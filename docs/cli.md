@@ -220,6 +220,9 @@ shows up as a spurious diff.
   `override`. `up`, `down`, `ps`, `run` and `setup` take the same flag, so a value this tool
   cannot resolve — a database URL from a fork somebody else made — reaches every service, its
   health checks and the written file alike
+- `--env KEY` with no value takes it from the environment `canopyd` was started with, like
+  `docker run -e KEY`. That is how to pass a secret: arguments are visible to every user on
+  the machine through `ps`, an environment is not
 
 Values are single-quoted when they need it. Double quotes would not do: `sh` still expands `$`,
 backticks and `\` inside them, so a password containing `$` would not survive a round trip

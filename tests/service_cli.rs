@@ -403,7 +403,8 @@ fn run_supervises_in_the_foreground_and_shuts_down_cleanly() {
 
 #[test]
 fn run_takes_requests_on_stdin_and_stops_when_stdin_closes() {
-    use std::io::{Read, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::{Arc, Mutex};
 
     // What an embedder does: hold `run` as a child, steer single services through its stdin, and
     // rely on a closed pipe — its own death included — to take the services down with it.
@@ -418,38 +419,51 @@ fn run_takes_requests_on_stdin_and_stops_when_stdin_closes() {
         .spawn()
         .expect("spawn run");
     let mut stdin = child.stdin.take().expect("stdin");
-    let settle = |want: usize| {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while processes_matching(&tag) != want && std::time::Instant::now() < deadline {
+
+    // Events are read as they arrive, the way an embedder reads them. Each step below waits for
+    // the event that proves the last request was carried out, never for a length of time: the
+    // loop is busy for as long as a start takes, and that is not a number a test can know.
+    let events: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = events.clone();
+    let stderr = child.stderr.take().expect("stderr");
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            sink.lock().unwrap().push(line);
+        }
+    });
+    let count = |needle: &str| events.lock().unwrap().iter().filter(|line| line.contains(needle)).count();
+    let saw = |needle: &str, times: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while count(needle) < times && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        processes_matching(&tag)
+        assert!(count(needle) >= times, "never saw {needle} ×{times}: {:?}", events.lock().unwrap());
     };
-    assert_eq!(settle(1), 1, "the service never started");
+
+    saw(r#""event":"started""#, 1);
+    assert_eq!(processes_matching(&tag), 1);
 
     writeln!(stdin, "stop web").unwrap();
-    assert_eq!(settle(0), 0, "stop did not stop it");
-    // Held: several polls later `restart: always` still has not brought it back.
-    std::thread::sleep(std::time::Duration::from_millis(900));
-    assert_eq!(processes_matching(&tag), 0, "a requested stop was treated as a crash");
+    saw(r#""event":"stopped""#, 1);
+    assert_eq!(processes_matching(&tag), 0, "stop did not stop it");
+    // Held: a request that is answered after the stop proves the loop has been round again, and
+    // `restart: always` still has not brought the service back.
+    writeln!(stdin, "juggle web").unwrap();
+    saw(r#""event":"rejected","request":"juggle web""#, 1);
+    assert_eq!(count(r#""event":"started""#), 1, "a requested stop was treated as a crash");
+    assert_eq!(processes_matching(&tag), 0);
 
     writeln!(stdin, "start web").unwrap();
-    assert_eq!(settle(1), 1, "start did not start it");
+    saw(r#""event":"started""#, 2);
+    assert_eq!(processes_matching(&tag), 1, "start did not start it");
 
-    writeln!(stdin, "juggle web").unwrap();
-    // Long enough for the loop to read the line before the pipe closing ends the run.
-    std::thread::sleep(std::time::Duration::from_millis(900));
     drop(stdin);
-
     let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(20)).expect("run exited");
     assert!(status.success(), "a closed control pipe is a clean shutdown");
-    assert_eq!(settle(0), 0, "the service outlived the supervisor");
+    reader.join().expect("stderr reader");
+    assert_eq!(count(r#""event":"stopped""#), 2, "{:?}", events.lock().unwrap());
+    assert_eq!(processes_matching(&tag), 0, "the service outlived the supervisor");
 
-    let mut events = String::new();
-    child.stderr.take().unwrap().read_to_string(&mut events).unwrap();
-    assert_eq!(events.matches(r#""event":"started""#).count(), 2, "{events}");
-    assert_eq!(events.matches(r#""event":"stopped""#).count(), 2, "{events}");
-    assert!(events.contains(r#""event":"rejected","request":"juggle web""#), "{events}");
     let mut envelope = Vec::new();
     child.stdout.take().unwrap().read_to_end(&mut envelope).unwrap();
     assert_eq!(ok_envelope(&envelope)["command"], "run");

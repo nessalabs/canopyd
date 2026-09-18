@@ -994,19 +994,20 @@ fn searched_description(canopy: &Canopy) -> String {
 
 /// `KEY=VALUE`, the spelling `--env` takes. An empty value is legal; an absent `=` is not.
 fn parse_env(raw: &[String]) -> Result<Vec<(String, String)>> {
+    let invalid = |message: String| Error::Module { code: canopyd::ErrorCode::ConfigInvalid, message };
     raw.iter()
-        .map(|text| {
-            let (key, value) = text.split_once('=').ok_or_else(|| Error::Module {
-                code: canopyd::ErrorCode::ConfigInvalid,
-                message: format!("--env needs KEY=VALUE, got {text:?}"),
-            })?;
-            if key.is_empty() {
-                return Err(Error::Module {
-                    code: canopyd::ErrorCode::ConfigInvalid,
-                    message: "--env needs a name before the =".to_owned(),
-                });
-            }
-            Ok((key.to_owned(), value.to_owned()))
+        .map(|text| match text.split_once('=') {
+            Some(("", _)) => Err(invalid("--env needs a name before the =".to_owned())),
+            Some((key, value)) => Ok((key.to_owned(), value.to_owned())),
+            // A bare name means "the value I was started with", the way `docker run -e KEY` does.
+            // It is how a secret is handed over: an argument is readable by every user on the
+            // machine through `ps`, and an environment is not.
+            None => match std::env::var(text) {
+                Ok(value) => Ok((text.clone(), value)),
+                Err(_) => {
+                    Err(invalid(format!("--env {text}: not KEY=VALUE, and {text} is not set in the environment")))
+                }
+            },
         })
         .collect()
 }

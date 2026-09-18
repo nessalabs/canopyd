@@ -245,12 +245,42 @@ fn env_write_puts_overrides_in_the_file() {
 }
 
 #[test]
+fn a_bare_env_name_takes_its_value_from_the_callers_environment() {
+    // How a secret is handed over without putting it in an argument list `ps` will show anyone.
+    let fx = Fixture::new();
+    fx.write("canopy.yaml", CONFIG);
+
+    let out = fx
+        .cwt()
+        .env("DATABASE_URL", "postgres://user:hunter2@db/fork")
+        .args(["env", "main", "--json", "--reveal", "--env", "DATABASE_URL"])
+        .output()
+        .unwrap();
+    let vars = ok_envelope(&out.stdout)["data"].as_array().unwrap().clone();
+    let url = vars.iter().find(|v| v["key"] == "DATABASE_URL").expect("DATABASE_URL present");
+    assert_eq!(url["value"], "postgres://user:hunter2@db/fork");
+    assert_eq!(url["source"], "override");
+}
+
+#[test]
+fn an_env_override_with_no_name_is_refused() {
+    let fx = Fixture::new();
+    fx.write("canopy.yaml", CONFIG);
+
+    let out = fx.cwt().args(["env", "main", "--json", "--env", "=value"]).output().unwrap();
+    let envelope = err_envelope(&out.stdout, "config_invalid");
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("needs a name"), "{envelope}");
+}
+
+#[test]
 fn a_malformed_env_override_is_refused() {
     let fx = Fixture::new();
     fx.write("canopy.yaml", CONFIG);
 
-    let out = fx.cwt().args(["env", "main", "--json", "--env", "NO_EQUALS_SIGN"]).output().unwrap();
-    err_envelope(&out.stdout, "config_invalid");
+    // Neither `KEY=VALUE` nor the name of anything the caller has set.
+    let out = fx.cwt().args(["env", "main", "--json", "--env", "NOT_SET_ANYWHERE_9F2"]).output().unwrap();
+    let envelope = err_envelope(&out.stdout, "config_invalid");
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("is not set in the environment"), "{envelope}");
 }
 
 #[test]
