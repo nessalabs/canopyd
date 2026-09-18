@@ -1,8 +1,8 @@
 //! The `post-checkout` bridge: noticing a worktree that plain git created.
 //!
-//! `canopywt new` is not the only way a worktree appears. Somebody types `git worktree add`, or
+//! `canopyd new` is not the only way a worktree appears. Somebody types `git worktree add`, or
 //! their editor does it for them, and the result is a checkout with no ports, no env file and no
-//! services — which looks like `canopywt` is broken rather than like it was never asked.
+//! services — which looks like `canopyd` is broken rather than like it was never asked.
 //!
 //! git fires `post-checkout` at the end of `git worktree add`, with the new worktree as the
 //! working directory. The problem is that it fires the same hook for every ordinary
@@ -25,12 +25,12 @@ use serde::Serialize;
 
 use crate::error::ErrorCode;
 
-/// Set by `canopywt new` around its own `git worktree add`, so the hook it fires does not call
+/// Set by `canopyd new` around its own `git worktree add`, so the hook it fires does not call
 /// back into the command that is already doing the work.
 ///
 /// Being set at all is the signal, whatever the value: this is our own recursion guard rather
 /// than a user setting, and nobody exports it by accident.
-pub const NO_HOOK_ENV: &str = "CANOPYWT_NO_HOOK";
+pub const NO_HOOK_ENV: &str = "CANOPYD_NO_HOOK";
 
 /// `$1` for the first checkout into a brand new worktree: git has no previous HEAD to name.
 /// This is the fact that separates a worktree add from an ordinary branch switch.
@@ -38,7 +38,7 @@ pub const NULL_REF: &str = "0000000000000000000000000000000000000000";
 
 /// How we recognise a script as ours. Written as a comment line of its own, and deliberately
 /// absent from [`snippet`]: a hook somebody merged into by hand is not one we may delete.
-pub const MARKER: &str = "canopywt hook post-checkout";
+pub const MARKER: &str = "canopyd hook post-checkout";
 
 /// The only hook this module installs.
 pub const HOOK_NAME: &str = "post-checkout";
@@ -55,7 +55,7 @@ pub enum HookError {
     /// A `post-checkout` that somebody else wrote. Never merged into automatically: the file is
     /// a program, and an automatic edit of somebody's program is how a repository ends up with a
     /// checkout that does two contradictory things.
-    #[error("{path} already exists and was not written by canopywt — add this to it by hand:\n{snippet}")]
+    #[error("{path} already exists and was not written by canopyd — add this to it by hand:\n{snippet}")]
     Foreign { path: Utf8PathBuf, snippet: String },
 
     #[error("{path}: {source}")]
@@ -98,18 +98,18 @@ pub enum Trigger {
 ///
 /// Pure, and testable without git, because every one of these four facts is cheap to state and
 /// expensive to get wrong: this hook runs on every checkout in the repository, and the cost of a
-/// false positive is `canopywt` provisioning an environment over somebody's branch switch.
+/// false positive is `canopyd` provisioning an environment over somebody's branch switch.
 ///
 /// - `flag` is `1` for a branch checkout; `0` means `git checkout -- file`, which moved no HEAD.
 /// - `old` is the previous HEAD, and the null ref only when there was none — a fresh worktree.
 /// - `.git` in a linked worktree is a *file* pointing at `<common>/worktrees/<name>`. A clone
 ///   fires the same hook with the null ref and flag 1, and is told apart by having a real `.git`
 ///   directory.
-/// - `no_hook` is [`NO_HOOK_ENV`], which `canopywt new` sets so its own `git worktree add`
+/// - `no_hook` is [`NO_HOOK_ENV`], which `canopyd new` sets so its own `git worktree add`
 ///   cannot recurse into this.
 pub fn classify(old: &str, new: &str, flag: &str, cwd: &Utf8Path, no_hook: bool) -> Trigger {
     if no_hook {
-        return not_one(format!("{NO_HOOK_ENV} is set — canopywt is already doing this"));
+        return not_one(format!("{NO_HOOK_ENV} is set — canopyd is already doing this"));
     }
     if flag != "1" {
         return not_one(format!("the checkout flag is {flag:?}, not \"1\" — a file checkout, not a branch checkout"));
@@ -189,7 +189,7 @@ pub fn script(binary: &str) -> String {
         "#!/bin/sh
 # {MARKER}
 #
-# Installed by `canopywt hook install`; remove it with `canopywt hook uninstall`.
+# Installed by `canopyd hook install`; remove it with `canopyd hook uninstall`.
 #
 # This hooks directory is shared by every linked worktree, so a hook that fails here fails
 # every checkout in the repository. It therefore always exits 0 — and git could not abort a
@@ -207,7 +207,7 @@ exit 0
 /// delete. `|| true` because their hook may run under `set -e`.
 pub fn snippet(binary: &str) -> String {
     format!(
-        "# let canopywt notice a worktree created by plain `git worktree add`\n{} hook {HOOK_NAME} \"$@\" || true\n",
+        "# let canopyd notice a worktree created by plain `git worktree add`\n{} hook {HOOK_NAME} \"$@\" || true\n",
         quote(binary)
     )
 }
@@ -219,7 +219,7 @@ fn quote(text: &str) -> String {
 }
 
 /// Ours only when [`MARKER`] stands on a comment line of its own — the shape [`script`] writes
-/// and [`snippet`] deliberately does not, so a hook that merely *mentions* canopywt is left
+/// and [`snippet`] deliberately does not, so a hook that merely *mentions* canopyd is left
 /// alone.
 fn is_ours(script: &str) -> bool {
     let marker = format!("# {MARKER}");
@@ -248,7 +248,7 @@ mod tests {
     use super::*;
 
     const HEAD: &str = "a950fe0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f";
-    const BINARY: &str = "/usr/local/bin/canopywt";
+    const BINARY: &str = "/usr/local/bin/canopyd";
 
     fn temp() -> (TempDir, Utf8PathBuf) {
         let dir = TempDir::new().expect("temp dir");
@@ -431,9 +431,9 @@ mod tests {
         assert_eq!(fs::read_to_string(hook_path(&hooks)).expect("read"), first);
 
         // The repair path: the binary moved, so the same command rewrites the line.
-        install(&hooks, "/opt/canopywt").expect("re-install elsewhere");
+        install(&hooks, "/opt/canopyd").expect("re-install elsewhere");
         let text = fs::read_to_string(hook_path(&hooks)).expect("read");
-        assert!(text.contains("'/opt/canopywt' hook post-checkout"), "{text}");
+        assert!(text.contains("'/opt/canopyd' hook post-checkout"), "{text}");
         assert!(!text.contains(BINARY), "{text}");
     }
 
@@ -509,7 +509,7 @@ mod tests {
         // One shared hooks directory: a hook that starts failing fails every checkout in the
         // repository, and git could not abort one on our say-so anyway.
         let (_dir, hooks) = temp();
-        install(&hooks, "/nonexistent/canopywt").expect("install");
+        install(&hooks, "/nonexistent/canopyd").expect("install");
 
         let output = run_hook(&hooks, [NULL_REF, HEAD, "1"]);
 
@@ -542,7 +542,7 @@ mod tests {
         let (_dir, base) = temp();
         let odd = base.join("o'brien tools");
         fs::create_dir_all(&odd).expect("create dir");
-        let binary = odd.join("canopywt");
+        let binary = odd.join("canopyd");
         fs::write(&binary, "#!/bin/sh\necho \"ran $*\"\n").expect("write binary");
         fs::set_permissions(binary.as_std_path(), fs::Permissions::from_mode(0o755)).expect("chmod");
         let hooks = base.join("hooks");
@@ -558,11 +558,11 @@ mod tests {
 
     #[test]
     fn the_marker_is_a_comment_line_of_its_own() {
-        // A hook that merely mentions canopywt is somebody else's; only the line we write makes
+        // A hook that merely mentions canopyd is somebody else's; only the line we write makes
         // a file ours to delete.
         assert!(is_ours(&script(BINARY)));
         assert!(!is_ours(&snippet(BINARY)));
-        assert!(!is_ours("#!/bin/sh\nexec canopywt hook post-checkout \"$@\"\n"));
+        assert!(!is_ours("#!/bin/sh\nexec canopyd hook post-checkout \"$@\"\n"));
         assert!(is_ours(&format!("#!/bin/sh\n  # {MARKER}  \n")));
     }
 }

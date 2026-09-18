@@ -1,7 +1,7 @@
 //! `canopy.yaml` — the whole configuration.
 //!
 //! Deliberately the *only* place settings live. A rule kept in some daemon's database is a rule
-//! `canopywt` cannot honour when it runs on its own, so `worktree:` and `copy:` are part of the
+//! `canopyd` cannot honour when it runs on its own, so `worktree:` and `copy:` are part of the
 //! file even though Canopy has historically kept them elsewhere.
 //!
 //! These types are the port of `packages/shared/src/schemas/environment.ts`. Where the zod
@@ -28,7 +28,7 @@ pub use parse::{Parsed, parse_str};
 pub use schema::json_schema;
 
 /// Top-level keys we recognise. An unknown one is a warning, not an error — a newer
-/// `canopywt` may have added a key this binary does not know, and refusing the whole file over
+/// `canopyd` may have added a key this binary does not know, and refusing the whole file over
 /// it would be worse than ignoring it.
 pub const TOP_LEVEL_KEYS: &[&str] =
     &["version", "name", "defaults", "env", "ports", "databases", "setup", "services", "env_file", "worktree", "copy"];
@@ -74,7 +74,7 @@ pub struct CanopyConfig {
     /// Commands run once when a worktree is provisioned, in order.
     #[serde(default)]
     pub setup: Vec<SetupStep>,
-    /// Long-running processes `canopywt up` starts and supervises.
+    /// Long-running processes `canopyd up` starts and supervises.
     #[serde(default)]
     pub services: Map<ServiceSpec>,
     /// Dotenv written into each worktree with everything resolved; `false` disables it.
@@ -393,7 +393,7 @@ fn default_compose_file() -> String {
 /// A setup step. `setup: [npm ci]` and the object form both land here — the bare string is the
 /// overwhelmingly common case and making people write `- run:` for it would be noise.
 ///
-/// Serialized — by `canopywt config show --json`, and so by the TypeScript binding — a step is
+/// Serialized — by `canopyd config show --json`, and so by the TypeScript binding — a step is
 /// always the object form, since that is the normalised one.
 // The derive only sees the struct, so `schema::a_step_may_be_a_bare_command` widens the result
 // to the `oneOf` the hand-written `Deserialize` below actually accepts. A `///` line here would

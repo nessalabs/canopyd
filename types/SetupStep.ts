@@ -4,7 +4,7 @@
  * A setup step. `setup: [npm ci]` and the object form both land here — the bare string is the
  * overwhelmingly common case and making people write `- run:` for it would be noise.
  *
- * Serialized — by `canopywt config show --json`, and so by the TypeScript binding — a step is
+ * Serialized — by `canopyd config show --json`, and so by the TypeScript binding — a step is
  * always the object form, since that is the normalised one.
  */
 export type SetupStep = { 

@@ -1,6 +1,6 @@
 # Command reference
 
-Everything `canopywt` currently does. Commands marked *planned* are named here because their
+Everything `canopyd` currently does. Commands marked *planned* are named here because their
 error codes and output shapes are already reserved — the surface does not shift under you when a
 milestone lands.
 
@@ -18,12 +18,12 @@ milestone lands.
 
 A bad flag exits `2` without printing an envelope.
 
-## `canopywt info`
+## `canopyd info`
 
 What repository this is and where its pieces are.
 
 ```console
-$ canopywt info
+$ canopyd info
 name        canopy
 root        /Users/me/dev/canopy
 common dir  /Users/me/dev/canopy/.git
@@ -37,12 +37,12 @@ to key state on. Run it inside a linked worktree and `root` and `git dir` change
 
 For a bare repository `root` is omitted entirely.
 
-## `canopywt list`
+## `canopyd list`
 
 Every worktree git knows about, main checkout first.
 
 ```console
-$ canopywt list
+$ canopyd list
 main                     /Users/me/dev/canopy
 feat/login               /Users/me/code/canopy.feat-login
 (detached a950fe09)      /Users/me/code/canopy.spike
@@ -51,20 +51,20 @@ feat/login               /Users/me/code/canopy.feat-login
 Detached worktrees show a shortened head; a bare entry shows `(bare)`.
 
 ```console
-$ canopywt list --json | jq -r '.data[] | select(.branch) | .branch'
+$ canopyd list --json | jq -r '.data[] | select(.branch) | .branch'
 ```
 
-## `canopywt config check`
+## `canopyd config check`
 
 Validate the `canopy.yaml` in effect.
 
 ```console
-$ canopywt config check
+$ canopyd config check
 ok: 0 error(s), 0 warning(s)
 ```
 
 ```console
-$ canopywt config check
+$ canopyd config check
 /Users/me/app/canopy.yaml: warning: services.app.helth: unknown key `helth` — ignored
 /Users/me/app/canopy.yaml: error: services.app.run: unknown port `${ports.wbe}`
 invalid: 1 error(s), 1 warning(s)
@@ -76,7 +76,7 @@ A **parse** error also carries a position, printed as `path:line:column:` so edi
 terminals can jump straight to it:
 
 ```console
-$ canopywt config check
+$ canopyd config check
 /Users/me/app/canopy.yaml:1:10: error: <root>: invalid u32
 invalid: 1 error(s), 0 warning(s)
 ```
@@ -87,7 +87,7 @@ not yet a position; spans for those land in M2b.
 **Exits `1` when the config is invalid**, so CI needs no parsing:
 
 ```bash
-canopywt config check || exit 1
+canopyd config check || exit 1
 ```
 
 ### `--stdin`
@@ -96,15 +96,15 @@ Validate text on stdin and touch no file — for an editor checking a buffer tha
 saved.
 
 ```bash
-cat draft.yaml | canopywt config check --stdin --json
+cat draft.yaml | canopyd config check --stdin --json
 ```
 
-## `canopywt config show`
+## `canopyd config show`
 
 The config with every default filled in. What a service actually gets, not what the file says.
 
 ```console
-$ canopywt config show --json | jq '.data.services.web'
+$ canopyd config show --json | jq '.data.services.web'
 {
   "run": "npx vite --host 127.0.0.1 --port ${ports.web} --strictPort",
   "cwd": "apps/web",
@@ -121,24 +121,24 @@ $ canopywt config show --json | jq '.data.services.web'
 
 Refuses an invalid config rather than returning part of one.
 
-## `canopywt config path`
+## `canopyd config path`
 
 Which file is in effect, and which of the three search locations it came from.
 
 ```console
-$ canopywt config path
+$ canopyd config path
 /Users/me/dev/canopy/canopy.yaml  (this worktree)
 ```
 
 Worth asking before editing. See [where the file is found](configuration.md#where-the-file-is-found).
 
-## `canopywt config schema`
+## `canopyd config schema`
 
 The JSON Schema for `canopy.yaml`, generated from the Rust types so it cannot drift from the
 parser.
 
 ```bash
-canopywt config schema > canopy.schema.json
+canopyd config schema > canopy.schema.json
 ```
 
 Point an editor at it and you get completion and inline validation for free:
@@ -148,7 +148,7 @@ Point an editor at it and you get completion and inline validation for free:
 version: 1
 ```
 
-It is also how a program in any language validates a config without running `canopywt`. Two
+It is also how a program in any language validates a config without running `canopyd`. Two
 deliberate limits: the schema cannot express what the linter checks (`depends_on` cycles,
 exactly-one-probe in `health`, unresolvable `${ports.x}`), and it leaves `additionalProperties`
 open because unknown keys are warnings here, not errors. `config check` remains the authority.
@@ -156,12 +156,12 @@ open because unknown keys are warnings here, not errors. `config check` remains 
 Generated TypeScript bindings ship alongside it in `types/`, so a consumer stops hand-writing
 types that have to match a Rust struct by eyeball.
 
-## `canopywt config init`
+## `canopyd config init`
 
 Print a starter `canopy.yaml` on stdout. **Writes nothing** — redirect it yourself:
 
 ```bash
-canopywt config init > canopy.yaml
+canopyd config init > canopy.yaml
 ```
 
 Printing rather than writing is the difference between a command you can pipe and one that
@@ -169,13 +169,13 @@ clobbers the file you were editing. The starter passes `config check` with no wa
 
 The only command that works outside a git repository.
 
-## `canopywt ports [<branch>]`
+## `canopyd ports [<branch>]`
 
 The ports allocated to a branch, allocating them on first ask. Idempotent — the numbers do not
 move once a branch has them.
 
 ```console
-$ canopywt ports
+$ canopyd ports
 api          14100
 web          11189
 ```
@@ -192,12 +192,12 @@ back to the pool.
 The registry lives in `.git/canopy/ports.json`, so every worktree of the repository sees one
 table.
 
-## `canopywt env [<branch>]`
+## `canopyd env [<branch>]`
 
 The resolved environment: Canopy's own facts, then `defaults.env`, then `env:`, last wins.
 
 ```console
-$ canopywt env
+$ canopyd env
 CANOPY_BRANCH=main
 CANOPY_PORT_API=14100
 CANOPY_PORT_WEB=11189
@@ -210,7 +210,7 @@ PUBLIC_URL=http://127.0.0.1:11189
 Output is sorted and deterministic: writing twice produces byte-identical files, so it never
 shows up as a spurious diff.
 
-- `--export` prints `export K='v'` lines for `eval "$(canopywt env --export)"`
+- `--export` prints `export K='v'` lines for `eval "$(canopyd env --export)"`
 - `--write` writes the file named by `env_file:` into the worktree
 - `--json` **masks** values that look like secrets; the file and `--export` keep the real ones,
   because masking is presentation, not storage
@@ -219,12 +219,12 @@ Values are single-quoted when they need it. Double quotes would not do: `sh` sti
 backticks and `\` inside them, so a password containing `$` would not survive a round trip
 through `. ./.env.canopy`.
 
-## `canopywt up [<branch>]`
+## `canopyd up [<branch>]`
 
 Start the worktree's services, in dependency order.
 
 ```console
-$ canopywt up feat/login
+$ canopyd up feat/login
 api              running    48210
 web              running    48214
 ```
@@ -244,7 +244,7 @@ and `autostart: false` keeps a service registered but unstarted unless you name 
 
 `runtime: docker` and `compose` report `unsupported` rather than pretending.
 
-## `canopywt down [<branch>]`
+## `canopyd down [<branch>]`
 
 Stop them, in reverse dependency order: `stop_signal` (default SIGTERM) to the whole process
 group, escalating to SIGKILL after `stop_timeout`.
@@ -253,16 +253,16 @@ The group, not the process, is the point — `run: npm start` that backgrounds a
 otherwise leave the watcher running. A record whose pid has been reused by an unrelated process
 is **refused**, never killed.
 
-## `canopywt ps [<branch>]`
+## `canopyd ps [<branch>]`
 
 What is running, re-verified from the OS rather than trusted from the record file.
 
 ```console
-$ canopywt ps feat/login --json | jq '.data[] | {name, state, pid, health}'
+$ canopyd ps feat/login --json | jq '.data[] | {name, state, pid, health}'
 { "name": "web", "state": "running", "pid": 48214, "health": { "status": "healthy" } }
 ```
 
-## `canopywt logs <service> [<branch>]`
+## `canopyd logs <service> [<branch>]`
 
 stdout and stderr, interleaved in one file — which is what you want when reading why something
 died.
@@ -270,13 +270,13 @@ died.
 - `-n <count>` how many lines to show (default 200)
 - `-f` keep printing as new lines arrive
 
-## `canopywt copy [<branch>]`
+## `canopyd copy [<branch>]`
 
 Carry the gitignored files a worktree needs — the `.env` your app reads, and optionally the
 dependency directories that cost minutes to rebuild.
 
 ```console
-$ canopywt copy feat/login
+$ canopyd copy feat/login
 copied     .env (41 bytes, 0ms)
 cloned     node_modules/react/index.js (6212 bytes, 1ms)
 ```
@@ -294,12 +294,12 @@ paths that worked.
 - `--from <path>` copies from another checkout instead of the main one
 - `--dry-run` reports the plan and writes nothing
 
-## `canopywt setup [<branch>]`
+## `canopyd setup [<branch>]`
 
 Run the worktree's `setup:` steps, in order, with the resolved environment.
 
 ```console
-$ canopywt setup feat/login
+$ canopyd setup feat/login
 skipped  install — lockfile.txt unchanged
 ran      build (1240ms)
 ```
@@ -321,13 +321,13 @@ A failing step stops the run; later steps do not run. Exit is `1`, and `--json` 
 verdict: `ok: false` with `setup_failed`, while `data` still carries every step with the tail of
 the failing one's output.
 
-## `canopywt run [<branch>]`
+## `canopyd run [<branch>]`
 
 Keeps the services alive in the foreground until Ctrl-C. This is the **only** place restart
 policy and continuous polling exist.
 
 ```console
-$ canopywt run
+$ canopyd run
 api started, pid 48210
 web started, pid 48214
 api exited with code 1
@@ -361,15 +361,15 @@ that asserts exactly that.
 Events go to stderr as they happen (one JSON object per line under `--json`), so stdout stays
 the final envelope.
 
-## `canopywt doctor`
+## `canopyd doctor`
 
-What is wrong with this repository's canopywt state. Read-only — it reports, it never fixes.
+What is wrong with this repository's canopyd state. Read-only — it reports, it never fixes.
 
 ```console
-$ canopywt doctor
+$ canopyd doctor
 warning  port_row_stale             the port registry holds 1 port(s) for feat/old, which has no worktree
 
-nothing here needs a person: `canopywt gc` sweeps all of it
+nothing here needs a person: `canopyd gc` sweeps all of it
 ```
 
 | Check | Is |
@@ -389,7 +389,7 @@ nothing here needs a person: `canopywt gc` sweeps all of it
 exits `0` — failing CI over it would make `doctor` useless in the place you most want it. An
 *error* is something only a person can settle, exits `1`, and reports `repository_unhealthy`.
 
-## `canopywt gc`
+## `canopyd gc`
 
 Sweeps what `doctor` reports as debris: stale registry rows, dead service records, state for
 worktrees git no longer lists, and logs over the cap (truncated, never deleted).
@@ -398,12 +398,12 @@ It removes only what it can prove is dead. A record whose process is alive, a st
 for a worktree git still lists, and anything it could not parse are all left exactly where they
 are — an unreadable record is precisely the one not to delete on a guess.
 
-## `canopywt hook install`
+## `canopyd hook install`
 
 Installs a `post-checkout` hook so a worktree created by plain `git worktree add` is noticed.
 
 ```console
-$ canopywt hook install
+$ canopyd hook install
 installed /Users/me/dev/app/.git/hooks/post-checkout
 ```
 
@@ -420,7 +420,7 @@ It fires on a worktree add and on nothing else. All four of these must hold:
 1. `$3 == 1` — a branch checkout, not a file checkout
 2. `$1` is the null ref — this is what separates `worktree add` from an ordinary `git checkout`
 3. `.git` in the new directory is a **file**, not a directory — separates it from `git clone`
-4. `CANOPYWT_NO_HOOK` is unset — `canopywt new` sets it on its own `git worktree add`, so the
+4. `CANOPYD_NO_HOOK` is unset — `canopyd new` sets it on its own `git worktree add`, so the
    hook cannot recurse
 
 `hook uninstall` removes only ours and leaves a foreign hook alone; `hook status` says whether

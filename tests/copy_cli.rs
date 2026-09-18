@@ -121,7 +121,7 @@ fn the_report_says_whether_a_clone_actually_cloned() {
 #[test]
 fn the_reflink_fallback_is_reported_as_a_plain_copy() {
     let (fx, _wt) = prepared();
-    let out = fx.cwt().args(["copy", "feat/x", "--json"]).env("CANOPYWT_NO_REFLINK", "1").output().unwrap();
+    let out = fx.cwt().args(["copy", "feat/x", "--json"]).env("CANOPYD_NO_REFLINK", "1").output().unwrap();
     let data = ok_envelope(&out.stdout)["data"].clone();
     let dep = data["entries"].as_array().unwrap().iter().find(|e| e["path"] == "deps/pkg/index.js").unwrap().clone();
     assert_eq!(dep["result"], "copied", "with reflink off this must not claim to have cloned");

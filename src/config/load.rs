@@ -5,7 +5,7 @@
 //! 1. **The worktree you are in.** A branch may change what it runs; that change travels with
 //!    the branch, and while you are on it, it wins.
 //! 2. **The repository's main checkout.** The committed, shared answer.
-//! 3. **`$XDG_CONFIG_HOME/canopywt/<repo>/canopy.yaml`.** For a repo that should not carry a
+//! 3. **`$XDG_CONFIG_HOME/canopyd/<repo>/canopy.yaml`.** For a repo that should not carry a
 //!    `canopy.yaml` of its own — someone else's project you want to run this way anyway.
 //!    Searched last, so a committed file always wins.
 
@@ -53,7 +53,7 @@ fn first_existing(dir: &Utf8Path) -> Option<Utf8PathBuf> {
     FILE_NAMES.iter().map(|name| dir.join(name)).find(|path| path.is_file())
 }
 
-/// `$XDG_CONFIG_HOME/canopywt`, falling back to `~/.config/canopywt`.
+/// `$XDG_CONFIG_HOME/canopyd`, falling back to `~/.config/canopyd`.
 pub fn user_config_dir() -> Option<Utf8PathBuf> {
     user_config_dir_from(std::env::var("XDG_CONFIG_HOME").ok(), std::env::var("HOME").ok())
 }
@@ -64,10 +64,10 @@ fn user_config_dir_from(xdg: Option<String>, home: Option<String>) -> Option<Utf
     // An empty variable is treated as unset, which is what the XDG spec requires and what
     // a `XDG_CONFIG_HOME=` line in a shell profile actually means.
     if let Some(xdg) = xdg.filter(|value| !value.is_empty()) {
-        return Some(Utf8PathBuf::from(xdg).join("canopywt"));
+        return Some(Utf8PathBuf::from(xdg).join("canopyd"));
     }
     let home = home.filter(|value| !value.is_empty())?;
-    Some(Utf8PathBuf::from(home).join(".config").join("canopywt"))
+    Some(Utf8PathBuf::from(home).join(".config").join("canopyd"))
 }
 
 /// Reads and parses a specific file.
@@ -75,7 +75,7 @@ pub fn load_file(path: &Utf8Path) -> Result<Parsed> {
     Ok(parse_str(&std::fs::read_to_string(path)?))
 }
 
-/// A starter file, written by `canopywt config init`.
+/// A starter file, written by `canopyd config init`.
 ///
 /// Commented rather than minimal: the first question after "how do I start" is always "what
 /// else can go in here", and the answer belongs next to the example.
@@ -132,13 +132,13 @@ mod tests {
     #[test]
     fn user_config_dir_prefers_xdg() {
         let got = user_config_dir_from(Some("/xdg".to_owned()), Some("/home/me".to_owned()));
-        assert_eq!(got.unwrap(), "/xdg/canopywt");
+        assert_eq!(got.unwrap(), "/xdg/canopyd");
     }
 
     #[test]
     fn user_config_dir_falls_back_to_home() {
         let got = user_config_dir_from(None, Some("/home/me".to_owned()));
-        assert_eq!(got.unwrap(), "/home/me/.config/canopywt");
+        assert_eq!(got.unwrap(), "/home/me/.config/canopyd");
     }
 
     #[test]
@@ -146,7 +146,7 @@ mod tests {
         // `XDG_CONFIG_HOME=` in a shell profile means "unset", not "the root directory".
         assert_eq!(
             user_config_dir_from(Some(String::new()), Some("/home/me".to_owned())).unwrap(),
-            "/home/me/.config/canopywt"
+            "/home/me/.config/canopyd"
         );
         assert_eq!(user_config_dir_from(None, Some(String::new())), None);
     }

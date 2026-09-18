@@ -95,7 +95,7 @@ fn up_is_idempotent() {
 
 #[test]
 fn the_service_outlives_the_command_that_started_it() {
-    // The no-daemon promise. `canopywt up` has fully exited by the time this asserts.
+    // The no-daemon promise. `canopyd up` has fully exited by the time this asserts.
     let tag = marker("outlives");
     let sleep = sleeper(&tag);
     let (fx, _wt) = prepared(&format!("  web:\n    run: {sleep}\n"));

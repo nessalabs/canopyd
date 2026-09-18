@@ -26,7 +26,7 @@ impl Default for Git {
     fn default() -> Self {
         // Respect an explicit override so tests and exotic installs can point at a specific
         // git, but never search anything but PATH.
-        Git { bin: std::env::var("CANOPYWT_GIT").unwrap_or_else(|_| "git".to_owned()), env: Vec::new() }
+        Git { bin: std::env::var("CANOPYD_GIT").unwrap_or_else(|_| "git".to_owned()), env: Vec::new() }
     }
 }
 

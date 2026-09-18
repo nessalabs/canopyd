@@ -44,7 +44,7 @@ databases: { [key in string]: DatabaseSpec },
  */
 setup: Array<SetupStep>, 
 /**
- * Long-running processes `canopywt up` starts and supervises.
+ * Long-running processes `canopyd up` starts and supervises.
  */
 services: { [key in string]: ServiceSpec }, 
 /**

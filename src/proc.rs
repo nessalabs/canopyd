@@ -1,7 +1,7 @@
 //! Starting a service process, and much later killing it, with nothing running in between.
 //!
 //! A port of `packages/daemon/src/env/services/runners/host.ts`, minus the daemon. The daemon
-//! could hold a `Child` handle and a pair of pipes for the life of the service; `canopywt up`
+//! could hold a `Child` handle and a pair of pipes for the life of the service; `canopyd up`
 //! exits seconds after it starts one. Everything that makes supervision work therefore has to
 //! survive in a JSON file and a pid, and the two hard parts follow from that:
 //!
@@ -37,7 +37,7 @@ use crate::error::ErrorCode;
 
 /// The launch id is exported under this name so a child (or anything it spawns) can tell which
 /// launch it belongs to — the one piece of identity that survives `exec`, unlike a pid.
-pub const LAUNCH_ID_VAR: &str = "CANOPYWT_LAUNCH_ID";
+pub const LAUNCH_ID_VAR: &str = "CANOPYD_LAUNCH_ID";
 
 /// How often a wait re-checks the pid. Short enough that `stop` returns as soon as the process
 /// is gone, long enough that a 30s timeout is not 30s of spinning.
@@ -121,7 +121,7 @@ pub struct ProcessRecord {
     /// means "nothing recorded", and only happens when the process was already gone before we
     /// could look — see [`identify`] for what each case means for signalling.
     pub start_time: Option<String>,
-    /// Random per launch, and exported to the child as `CANOPYWT_LAUNCH_ID`.
+    /// Random per launch, and exported to the child as `CANOPYD_LAUNCH_ID`.
     pub launch_id: String,
     pub command: String,
     pub cwd: Utf8PathBuf,
@@ -747,10 +747,10 @@ mod tests {
         let (_dir, path) = workspace();
         let inner = path.join("inner");
         fs::create_dir(&inner).expect("mkdir");
-        let env = BTreeMap::from([("CANOPYWT_TEST_VAR".to_owned(), "applied".to_owned())]);
+        let env = BTreeMap::from([("CANOPYD_TEST_VAR".to_owned(), "applied".to_owned())]);
         let log = path.join("log.txt");
         let record = spawn(&SpawnRequest {
-            command: "echo \"$CANOPYWT_TEST_VAR\" > marker.txt; echo done",
+            command: "echo \"$CANOPYD_TEST_VAR\" > marker.txt; echo done",
             cwd: &inner,
             env: &env,
             log: &log,
@@ -765,7 +765,7 @@ mod tests {
     #[test]
     fn launch_id_is_exported_to_the_child() {
         let (_dir, path) = workspace();
-        let record = start(&path, "echo \"$CANOPYWT_LAUNCH_ID\"");
+        let record = start(&path, "echo \"$CANOPYD_LAUNCH_ID\"");
 
         assert_eq!(record.launch_id.len(), 32, "{}", record.launch_id);
         assert!(record.launch_id.chars().all(|c| c.is_ascii_hexdigit()), "{}", record.launch_id);

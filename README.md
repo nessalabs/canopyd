@@ -4,7 +4,7 @@ Work on several branches at once, each with its own running environment — its 
 dependencies, its own dev server — described by one file and managed without a daemon.
 
 ```bash
-cargo install --git https://github.com/nessalabs/canopyd --locked   # installs the `canopywt` binary
+cargo install --git https://github.com/nessalabs/canopyd --locked   # installs the `canopyd` binary
 ```
 
 macOS and Linux.
@@ -16,7 +16,7 @@ everything after the checkout: which port this branch's dev server runs on, wher
 from, whether its dependencies are installed, what is actually running right now. That is the
 part people script by hand, per project, and get subtly wrong.
 
-`canopywt` reads a `canopy.yaml` and does it. No daemon, no background process, no database — so
+`canopyd` reads a `canopy.yaml` and does it. No daemon, no background process, no database — so
 it behaves the same from a terminal, a Makefile, a CI job or an agent.
 
 ```yaml
@@ -76,7 +76,7 @@ Every command takes `--json` and prints exactly one object on stdout, success or
 Progress goes to stderr, so you can watch a command work and pipe it at the same time.
 
 ```console
-$ canopywt config check --json
+$ canopyd config check --json
 {"v":1,"ok":true,"command":"config check","data":{"path":"…","valid":true,"errors":0,"warnings":0,"diagnostics":[]},"warnings":[]}
 ```
 

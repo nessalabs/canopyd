@@ -11,8 +11,8 @@ categories = ["command-line-utilities", "development-tools"]
 exclude = ["/.github", "/tests"]
 
 [[bin]]
-name = "canopywt"
-path = "src/bin/canopywt.rs"
+name = "canopyd"
+path = "src/bin/canopyd.rs"
 
 [features]
 # TypeScript bindings. Off in a normal build: `ts-rs` is a codegen tool, not something a

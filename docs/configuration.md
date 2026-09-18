@@ -1,14 +1,14 @@
 # `canopy.yaml` reference
 
 The whole configuration. Nothing lives anywhere else — not in a dotfile, not in a daemon's
-database — because a setting `canopywt` cannot read is a setting it cannot honour when it runs
+database — because a setting `canopyd` cannot read is a setting it cannot honour when it runs
 on its own.
 
 Validate any of what follows with:
 
 ```bash
-canopywt config check          # errors and warnings, each naming the key it is about
-canopywt config show           # the same file with every default filled in
+canopyd config check          # errors and warnings, each naming the key it is about
+canopyd config show           # the same file with every default filled in
 ```
 
 ## Where the file is found
@@ -19,9 +19,9 @@ Three places, most specific first. The first that exists wins:
 |---|---|---|
 | 1 | `<worktree>/canopy.yaml` | The worktree you are standing in. A branch may change what it runs, and that change travels with the branch. |
 | 2 | `<main checkout>/canopy.yaml` | The committed, shared answer. |
-| 3 | `$XDG_CONFIG_HOME/canopywt/<repo>/canopy.yaml` | A repo that should not carry a `canopy.yaml` of its own — someone else's project you still want to run this way. |
+| 3 | `$XDG_CONFIG_HOME/canopyd/<repo>/canopy.yaml` | A repo that should not carry a `canopy.yaml` of its own — someone else's project you still want to run this way. |
 
-`canopy.yml` is accepted wherever `canopy.yaml` is. `canopywt config path` reports which file is
+`canopy.yml` is accepted wherever `canopy.yaml` is. `canopyd config path` reports which file is
 actually in effect, and which of the three it came from — worth asking before you spend ten
 minutes editing the wrong one.
 
@@ -105,7 +105,7 @@ a value that *contains* `${…}` after substitution is not re-scanned.
 **`{{ variable | filter }}`** — used *only* in `worktree.path`, which is rendered before a
 worktree exists and so cannot reference anything inside one. See [worktree](#worktree).
 
-> Resolution of `${…}` lands with `canopywt env`. Today the linter checks that every reference
+> Resolution of `${…}` lands with `canopyd env`. Today the linter checks that every reference
 > points at something that exists, which is the half that catches typos.
 
 ## ports

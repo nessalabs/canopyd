@@ -61,7 +61,7 @@ expression: "config::json_schema()"
       "default": {}
     },
     "services": {
-      "description": "Long-running processes `canopywt up` starts and supervises.",
+      "description": "Long-running processes `canopyd up` starts and supervises.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/$defs/ServiceSpec"

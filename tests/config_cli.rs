@@ -222,7 +222,7 @@ fn a_user_level_config_is_found_when_the_repo_has_none() {
     // someone else's project you still want to run this way.
     let fx = Fixture::new();
     // The fixture pins XDG_CONFIG_HOME, and the repo's directory is named `repo`.
-    let user_dir = fx.home.join(".config").join("canopywt").join("repo");
+    let user_dir = fx.home.join(".config").join("canopyd").join("repo");
     std::fs::create_dir_all(&user_dir).unwrap();
     std::fs::write(user_dir.join("canopy.yaml"), "version: 1\nname: from-user-config\nservices:\n  a:\n    run: x\n")
         .unwrap();
@@ -239,7 +239,7 @@ fn a_committed_config_beats_the_user_level_one() {
     // or two developers on the same branch get different environments.
     let fx = Fixture::new();
     fx.write("canopy.yaml", "version: 1\nname: committed\nservices:\n  a:\n    run: x\n");
-    let user_dir = fx.home.join(".config").join("canopywt").join("repo");
+    let user_dir = fx.home.join(".config").join("canopyd").join("repo");
     std::fs::create_dir_all(&user_dir).unwrap();
     std::fs::write(user_dir.join("canopy.yaml"), "version: 1\nname: from-user-config\nservices:\n  a:\n    run: x\n")
         .unwrap();

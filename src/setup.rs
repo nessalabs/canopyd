@@ -1,7 +1,7 @@
 //! Running a worktree's `setup:` steps — the port of `runShell` and `anyChanged` in
 //! `packages/daemon/src/env/provision/steps.ts`.
 //!
-//! Setup is the slowest thing `canopywt` does and the thing most likely to fail, so three
+//! Setup is the slowest thing `canopyd` does and the thing most likely to fail, so three
 //! decisions shape the whole module:
 //!
 //! - **Output is streamed, not collected.** A four-minute `npm ci` that prints nothing until it
@@ -1246,7 +1246,7 @@ mod tests {
         // The shell ignores SIGTERM and keeps looping, so only SIGKILL can end it. Without the
         // escalation this run would never finish. The token is there so a regression leaves a
         // findable process rather than an anonymous spinner nobody can clean up.
-        let token = "canopywt-31045";
+        let token = "canopyd-31045";
         reap(token);
         let running =
             spawn_run(&format!("trap '' TERM; while true; do sleep 0.05; done # {token}"), Duration::from_millis(200));

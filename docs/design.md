@@ -9,7 +9,7 @@ environment: its own ports, its own dependencies, its own processes. Git worktre
 checkouts. Everything after that — which port, which `.env`, which dev server — is the part
 people script by hand and get subtly wrong.
 
-`canopywt` reads one file, `canopy.yaml`, and does the rest. Without a daemon, so it works the
+`canopyd` reads one file, `canopy.yaml`, and does the rest. Without a daemon, so it works the
 same from a terminal, a CI job, a Makefile or an agent.
 
 ## Invariants
@@ -44,7 +44,7 @@ formatting go to stderr. You can watch a command work and pipe its output at the
 
 ### `canopy.yaml` is the whole configuration
 
-No dotfile, no database, no per-machine settings store. A setting `canopywt` cannot read is a
+No dotfile, no database, no per-machine settings store. A setting `canopyd` cannot read is a
 setting it cannot honour when it runs alone, which defeats the point.
 
 The cost is that the file has to carry things a GUI might prefer to keep elsewhere — the

@@ -73,7 +73,7 @@ fn defaults_match_the_daemons() {
     let web = &config.services["web"];
 
     // Each of these is a default the TypeScript schema applies; a difference here means a
-    // config behaves one way in Canopy and another in canopywt.
+    // config behaves one way in Canopy and another in canopyd.
     assert_eq!(web.restart, config::RestartPolicy::OnFailure);
     assert!(web.autostart);
     assert_eq!(web.stop_signal, "SIGTERM");

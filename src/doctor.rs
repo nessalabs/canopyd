@@ -1,11 +1,11 @@
-//! What is wrong with this repository's canopywt state, and what can safely be swept.
+//! What is wrong with this repository's canopyd state, and what can safely be swept.
 //!
 //! Two entry points that have to agree with each other. [`diagnose`] looks and reports; it
 //! changes nothing, so it is safe to run from a prompt, a status bar or a cron job. [`gc`]
 //! sweeps the subset of those findings that can be *proved* dead, and nothing else.
 //!
 //! The proof obligation is the whole module. Everything here is state that outlives a process:
-//! a port row written by a `canopywt up` that never came back, a `sleep 3600` still serving a
+//! a port row written by a `canopyd up` that never came back, a `sleep 3600` still serving a
 //! branch someone removed last week. Deleting the wrong one of those does not lose a cache, it
 //! loses the only handle on a running process — so a record whose pid is alive is never touched,
 //! a state directory git still lists is never removed, and a log is truncated rather than
@@ -120,7 +120,7 @@ pub struct Swept {
     pub ports_released: usize,
     pub records_removed: usize,
     pub state_dirs_removed: usize,
-    /// Truncated in place, never deleted — a `canopywt logs -f` holds an open descriptor.
+    /// Truncated in place, never deleted — a `canopyd logs -f` holds an open descriptor.
     pub logs_truncated: usize,
 }
 
@@ -209,7 +209,7 @@ pub fn diagnose_with(
 
 /// A worktree git lists whose directory is gone — usually a `rm -rf` where a
 /// `git worktree remove` was meant. Left for a person: only `git worktree prune` (or a
-/// deliberate `canopywt rm`) should retire a worktree, never a sweep.
+/// deliberate `canopyd rm`) should retire a worktree, never a sweep.
 fn check_worktrees(worktrees: &[WorktreeEntry]) -> Vec<Finding> {
     worktrees
         .iter()
@@ -383,8 +383,8 @@ fn check_reflink(dir: &Utf8Path, clone: &dyn CloneProbe) -> Option<Finding> {
 /// Clones a byte and throws it away. `None` when the probe could not be carried out at all,
 /// which is not evidence either way.
 fn probe_reflink(dir: &Utf8Path, clone: &dyn CloneProbe) -> Option<bool> {
-    let source = dir.join(format!(".canopywt-doctor-{}.probe", std::process::id()));
-    let target = dir.join(format!(".canopywt-doctor-{}.clone", std::process::id()));
+    let source = dir.join(format!(".canopyd-doctor-{}.probe", std::process::id()));
+    let target = dir.join(format!(".canopyd-doctor-{}.clone", std::process::id()));
     if fs::write(&source, b"canopy").is_err() {
         return None;
     }
@@ -592,7 +592,7 @@ fn remove_file(path: &Utf8Path) -> Result<(), DoctorError> {
 fn read_registry(path: &Utf8Path) -> Result<Vec<Allocation>, String> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        // No file is no allocations: the normal state before the first `canopywt up`.
+        // No file is no allocations: the normal state before the first `canopyd up`.
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.to_string()),
     };
@@ -1221,8 +1221,8 @@ mod tests {
     fn a_probe_that_cannot_be_carried_out_says_nothing() {
         // "I could not tell" must not become "your disk is slow": the directory being
         // unwritable is a different problem with a different fix.
-        assert_eq!(probe_reflink(Utf8Path::new("/nonexistent/canopywt"), &Cloning(true)), None);
-        assert_eq!(check_reflink(Utf8Path::new("/nonexistent/canopywt"), &Cloning(true)), None);
+        assert_eq!(probe_reflink(Utf8Path::new("/nonexistent/canopyd"), &Cloning(true)), None);
+        assert_eq!(check_reflink(Utf8Path::new("/nonexistent/canopyd"), &Cloning(true)), None);
     }
 
     #[test]
@@ -1412,7 +1412,7 @@ mod tests {
 
     #[test]
     fn gc_truncates_an_oversized_log_rather_than_deleting_it() {
-        // A `canopywt logs -f` has this file open; replacing it would leave the follower
+        // A `canopyd logs -f` has this file open; replacing it would leave the follower
         // watching an inode nothing writes to any more.
         let fixture = Fixture::new();
         let path = fixture.write_log("main", "web", 65);

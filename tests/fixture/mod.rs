@@ -1,6 +1,6 @@
 //! A throwaway git repository per test.
 //!
-//! Every `git` and `canopywt` invocation runs with a pinned environment. Without it the suite
+//! Every `git` and `canopyd` invocation runs with a pinned environment. Without it the suite
 //! passes or fails according to the developer's own git config — a global `commit.gpgsign`, an
 //! `init.defaultBranch=master`, a `core.hooksPath` pointing at someone's dotfiles — and the
 //! failure only reproduces on their machine.
@@ -82,15 +82,15 @@ impl Fixture {
         self.git(["branch", name]);
     }
 
-    /// `canopywt`, pointed at the fixture repo, with the same pinned environment.
+    /// `canopyd`, pointed at the fixture repo, with the same pinned environment.
     pub fn cwt(&self) -> Command {
-        let mut command = Command::cargo_bin("canopywt").expect("canopywt binary is built");
+        let mut command = Command::cargo_bin("canopyd").expect("canopyd binary is built");
         self.pin(&mut command);
         command.current_dir(&self.root);
         command
     }
 
-    /// `canopywt` run from somewhere other than the repo root.
+    /// `canopyd` run from somewhere other than the repo root.
     pub fn cwt_in(&self, cwd: &Utf8Path) -> Command {
         let mut command = self.cwt();
         command.current_dir(cwd);
@@ -100,7 +100,7 @@ impl Fixture {
     fn pin(&self, command: &mut Command) {
         command.env_clear();
         // PATH must survive env_clear or nothing can spawn git at all. The coverage variables
-        // must survive too: `canopywt` is measured by running it, and a subprocess that cannot
+        // must survive too: `canopyd` is measured by running it, and a subprocess that cannot
         // see LLVM_PROFILE_FILE silently writes no profile, which reads as untested code.
         for name in
             ["PATH", "LLVM_PROFILE_FILE", "CARGO_LLVM_COV", "CARGO_LLVM_COV_SHOW_ENV", "CARGO_LLVM_COV_TARGET_DIR"]

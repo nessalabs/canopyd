@@ -42,7 +42,7 @@ pub const DEFAULT_RANGE: (u16, u16) = (10_000, 19_999);
 
 /// How long a read-modify-write waits for the lock before giving up.
 ///
-/// Long enough that a slow filesystem or a concurrent `canopywt up` finishes first, short
+/// Long enough that a slow filesystem or a concurrent `canopyd up` finishes first, short
 /// enough that a stale lock does not look like a hang.
 pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -302,7 +302,7 @@ impl Registry {
     /// Allocate-if-absent for every declared port, under the file lock.
     ///
     /// Idempotent: a second call returns the same numbers and writes nothing. The file is
-    /// re-read inside the lock, so a concurrent `canopywt` in another worktree cannot be
+    /// re-read inside the lock, so a concurrent `canopyd` in another worktree cannot be
     /// clobbered by this one, and all-or-nothing on failure, so a range that runs out does not
     /// leave half an environment written down.
     ///
@@ -1141,7 +1141,7 @@ mod tests {
 
     #[test]
     fn an_unknown_field_in_a_row_is_not_corruption() {
-        // A newer canopywt may add a column; refusing the whole table over it would strand
+        // A newer canopyd may add a column; refusing the whole table over it would strand
         // every worktree on the older binary.
         let (_dir, path) = temp_registry();
         fs::write(

@@ -71,7 +71,7 @@ fn config_commands_print_something_a_person_can_act_on() {
 fn path_prints_just_the_path_so_it_can_be_used_in_a_shell() {
     let fx = prepared();
     let text = human(&fx, &["path", "feat/x"]);
-    // One line, no decoration: `cd "$(canopywt path feat/x)"` has to work.
+    // One line, no decoration: `cd "$(canopyd path feat/x)"` has to work.
     assert_eq!(text.lines().count(), 1, "{text:?}");
     assert!(text.trim().ends_with("wt/feat-x"), "{text:?}");
 }
@@ -229,7 +229,7 @@ fn doctor_and_gc_report_in_words() {
     let found = human(&fx, &["doctor"]);
     assert!(found.contains("port_row_stale"), "{found}");
     // A warning is debris, so the output says who cleans it up rather than just complaining.
-    assert!(found.contains("canopywt gc"), "{found}");
+    assert!(found.contains("canopyd gc"), "{found}");
 
     let swept = human(&fx, &["gc"]);
     assert!(swept.contains("released 1 port"), "{swept}");

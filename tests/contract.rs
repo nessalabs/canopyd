@@ -166,7 +166,7 @@ fn a_git_failure_carries_gits_own_stderr() {
     // Translating git's message would lose the part the user needs ("fatal: a branch named 'x'
     // already exists"), so it is passed through in `error.details`.
     let fx = Fixture::new();
-    let out = fx.cwt().args(["list", "--json"]).env("CANOPYWT_GIT", "/usr/bin/false").output().unwrap();
+    let out = fx.cwt().args(["list", "--json"]).env("CANOPYD_GIT", "/usr/bin/false").output().unwrap();
 
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["ok"], false);

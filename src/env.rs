@@ -2,7 +2,7 @@
 //!
 //! Port of `packages/daemon/src/env/config/resolve.ts`. Every rule about *which* value a
 //! service ends up seeing lives here and nowhere else, because "why does my service see this?"
-//! must have exactly one answer — and because a preview (`canopywt env`) has to show the same
+//! must have exactly one answer — and because a preview (`canopyd env`) has to show the same
 //! table the supervisor will hand to `execve`.
 //!
 //! Three decisions are worth their reasons up front.
@@ -144,7 +144,7 @@ impl EnvTable {
         out
     }
 
-    /// `export K='v'` lines for `eval "$(canopywt env --export)"`.
+    /// `export K='v'` lines for `eval "$(canopyd env --export)"`.
     ///
     /// Always single-quoted, even when the dotenv would not bother: this text is fed straight
     /// to a shell, so there is no reader to be lenient for and nothing to gain from bareness.

@@ -1,6 +1,6 @@
 //! `canopyd` — git worktree dev environments driven by `canopy.yaml`.
 //!
-//! One crate, two faces: a library other Rust programs embed, and the `canopywt` binary. The
+//! One crate, two faces: a library other Rust programs embed, and the `canopyd` binary. The
 //! binary is a printf over the library — every subcommand calls exactly one method here and
 //! serializes the result — so the `--json` contract cannot drift from the API.
 //!
@@ -218,7 +218,7 @@ impl Canopy {
     }
 }
 
-/// `canopywt info`.
+/// `canopyd info`.
 #[derive(Debug, Clone, Serialize)]
 pub struct RepoInfo {
     /// Stable repository name — the common dir's parent.

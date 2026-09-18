@@ -30,7 +30,7 @@ use crate::git::Git;
 pub const INCLUDE_FILE: &str = ".canopyinclude";
 
 /// Set it to `1` to force the plain-copy path even where the filesystem can clone.
-pub const NO_REFLINK_ENV: &str = "CANOPYWT_NO_REFLINK";
+pub const NO_REFLINK_ENV: &str = "CANOPYD_NO_REFLINK";
 
 // ---------------------------------------------------------------------------------------
 // The report
@@ -111,7 +111,7 @@ impl CopyOptions {
 
 /// Whether to try a copy-on-write clone at all.
 ///
-/// The test seam behind `CANOPYWT_NO_REFLINK`: the fallback path is the one that turns a fast
+/// The test seam behind `CANOPYD_NO_REFLINK`: the fallback path is the one that turns a fast
 /// provision into a slow one, and it cannot be exercised by choosing a filesystem from inside a
 /// test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,7 +158,7 @@ pub enum CopyError {
 
 /// Carries every gitignored file matching `rules` from `source` into `target`.
 ///
-/// Honours `CANOPYWT_NO_REFLINK=1`; see [`copy_ignored_with`] for the same thing with the clone
+/// Honours `CANOPYD_NO_REFLINK=1`; see [`copy_ignored_with`] for the same thing with the clone
 /// decision made by the caller.
 pub fn copy_ignored(
     git: &Git,

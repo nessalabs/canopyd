@@ -1,6 +1,6 @@
 # The JSON interface
 
-Everything `canopywt` can do is available to a program, not just a person. Pass `--json` to any
+Everything `canopyd` can do is available to a program, not just a person. Pass `--json` to any
 command and stdout carries exactly one JSON object.
 
 This page is the contract. It is what you pin against.
@@ -63,7 +63,7 @@ Branch on `code`. It is a stable API; `message` is for humans and may be reworde
 | `setup_failed` | 1 | A `setup:` step exited non-zero. `data` still carries every step. |
 | `service_failed` | 1 | A service would not start or would not become healthy. |
 | `repository_unhealthy` | 1 | `doctor` found something only a person can settle. Warnings — the debris `gc` sweeps — do **not** produce this. |
-| `locked` | **3** | Another `canopywt` holds the lock. Retry. |
+| `locked` | **3** | Another `canopyd` holds the lock. Retry. |
 | `io` | 1 | A filesystem or encoding problem. |
 
 Codes for commands not yet implemented are listed because they are already reserved — the set
@@ -74,7 +74,7 @@ named 'x' already exists") is the part you need, and translating it would throw 
 
 ## Verdicts
 
-One case needs care. `canopywt config check` on a broken file *ran perfectly* — the answer is
+One case needs care. `canopyd config check` on a broken file *ran perfectly* — the answer is
 just "no". So:
 
 ```json
@@ -159,16 +159,16 @@ you do in a new directory.
 
 ```bash
 # Every port this branch will use
-canopywt config show --json | jq -r '.ports | keys[]'
+canopyd config show --json | jq -r '.ports | keys[]'
 
 # Fail a CI job on config problems, showing them
-if ! canopywt config check --json > result.json; then
+if ! canopyd config check --json > result.json; then
   jq -r '.data.diagnostics[] | "\(.severity) \(.path): \(.message)"' result.json
   exit 1
 fi
 
 # Retry once if another process holds the lock
-canopywt list --json || [ $? -eq 3 ] && sleep 1 && canopywt list --json
+canopyd list --json || [ $? -eq 3 ] && sleep 1 && canopyd list --json
 ```
 
 ## Using it from Rust

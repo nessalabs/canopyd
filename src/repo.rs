@@ -1,7 +1,7 @@
 //! Repository discovery and the worktree list.
 //!
 //! `git worktree list` is the registry. Nothing this crate persists is ever consulted to answer
-//! "what worktrees exist" or "where is branch X" — that keeps `canopywt` honest when a worktree
+//! "what worktrees exist" or "where is branch X" — that keeps `canopyd` honest when a worktree
 //! is created, moved or removed by plain git behind its back.
 
 use camino::{Utf8Path, Utf8PathBuf};

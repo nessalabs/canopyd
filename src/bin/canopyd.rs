@@ -1,4 +1,4 @@
-//! `canopywt` — the CLI.
+//! `canopyd` — the CLI.
 //!
 //! Deliberately thin: parse, call one library method, print. Anything that looks like logic
 //! belongs in the library, where the other consumers of this crate can reach it.
@@ -13,7 +13,7 @@ use canopyd::{Canopy, Error};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "canopywt", version, about = "Git worktree dev environments driven by canopy.yaml")]
+#[command(name = "canopyd", version, about = "Git worktree dev environments driven by canopy.yaml")]
 struct Cli {
     /// Run as if started in this directory.
     #[arg(short = 'C', global = true, value_name = "PATH")]
@@ -174,7 +174,7 @@ enum Command {
         #[arg(long)]
         restart_window: Option<String>,
     },
-    /// Report anything wrong with this repository's canopywt state.
+    /// Report anything wrong with this repository's canopyd state.
     Doctor,
     /// Sweep what `doctor` reports as debris. Removes only what it can prove is dead.
     Gc {
@@ -294,7 +294,7 @@ fn main() -> ExitCode {
                 let envelope = Envelope::err(name, &error);
                 println!("{}", serde_json::to_string(&envelope).expect("envelope is serializable"));
             } else {
-                let _ = writeln!(std::io::stderr(), "canopywt: {error}");
+                let _ = writeln!(std::io::stderr(), "canopyd: {error}");
             }
             ExitCode::from(error.code().exit_code())
         }
@@ -711,7 +711,7 @@ fn run(cli: &Cli) -> Result<u8> {
                     );
                 }
                 if errors == 0 {
-                    println!("\nnothing here needs a person: `canopywt gc` sweeps all of it");
+                    println!("\nnothing here needs a person: `canopyd gc` sweeps all of it");
                 }
             }
             return Ok(if errors == 0 { 0 } else { 1 });
@@ -894,7 +894,7 @@ fn source_label(source: canopyd::ConfigSource) -> &'static str {
 fn searched_description(canopy: &Canopy) -> String {
     let root = canopy.repo().root.as_ref().map(|p| p.to_string()).unwrap_or_else(|| "(bare repo)".to_owned());
     format!(
-        "looked in {root}, the main checkout, and your user config; `canopywt config init > canopy.yaml` writes a starter"
+        "looked in {root}, the main checkout, and your user config; `canopyd config init > canopy.yaml` writes a starter"
     )
 }
 
@@ -1050,7 +1050,7 @@ fn run_hook(cli: &Cli, canopy: &Canopy, command: &HookCommand) -> Result<u8> {
                 .ok()
                 .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
                 .map(|path| path.to_string())
-                .unwrap_or_else(|| "canopywt".to_owned());
+                .unwrap_or_else(|| "canopyd".to_owned());
             let path = canopyd::hook::install(&dir, &binary)?;
             if cli.json {
                 emit("hook install", &serde_json::json!({ "path": path }));
@@ -1086,7 +1086,7 @@ fn run_hook(cli: &Cli, canopy: &Canopy, command: &HookCommand) -> Result<u8> {
             if cli.json {
                 emit("hook post-checkout", &trigger);
             } else if let canopyd::hook::Trigger::WorktreeAdded = trigger {
-                println!("canopywt: new worktree at {cwd}");
+                println!("canopyd: new worktree at {cwd}");
             }
             // Never anything but 0. git cannot abort a checkout, the hooks directory is shared
             // across every worktree, and a hook that fails here breaks all of them at once.

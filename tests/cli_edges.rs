@@ -59,7 +59,7 @@ fn the_directory_flag_reports_a_path_that_is_not_a_repository() {
 /// this asserts the envelope's shape and that it is a failure.
 #[track_caller]
 fn fails_when_git_fails(fx: &Fixture, args: &[&str]) {
-    let out = fx.cwt().args(args).arg("--json").env("CANOPYWT_GIT", "/usr/bin/false").output().unwrap();
+    let out = fx.cwt().args(args).arg("--json").env("CANOPYD_GIT", "/usr/bin/false").output().unwrap();
     let text = String::from_utf8(out.stdout).unwrap();
     let value: serde_json::Value = serde_json::from_str(text.trim())
         .unwrap_or_else(|e| panic!("`{}` printed no envelope ({e}): {text:?}", args.join(" ")));
@@ -190,7 +190,7 @@ fn config_path_names_where_a_fallback_config_came_from() {
 
     // And the user-level one, when the repository has none at all.
     let bare = Fixture::new();
-    let user_dir = bare.home.join(".config/canopywt/repo");
+    let user_dir = bare.home.join(".config/canopyd/repo");
     std::fs::create_dir_all(&user_dir).unwrap();
     std::fs::write(user_dir.join("canopy.yaml"), "version: 1\nservices:\n  a:\n    run: x\n").unwrap();
     let text = String::from_utf8(bare.cwt().args(["config", "path"]).output().unwrap().stdout).unwrap();
@@ -256,7 +256,7 @@ fn copying_from_a_bare_repository_says_there_is_nothing_to_copy_from() {
 
 /// A git that behaves normally except for one subcommand pair, which always fails.
 ///
-/// `CANOPYWT_GIT` pointed at a failing binary makes *every* call fail, which never gets past
+/// `CANOPYD_GIT` pointed at a failing binary makes *every* call fail, which never gets past
 /// the first one. Creating and removing a worktree both list first, so the arms that map their
 /// own failures need a git that answers the listing and refuses the operation.
 fn selective_git(fx: &Fixture, refuse: &str) -> camino::Utf8PathBuf {
@@ -281,7 +281,7 @@ fn selective_git(fx: &Fixture, refuse: &str) -> camino::Utf8PathBuf {
 fn a_create_that_git_refuses_is_reported_as_a_create_failure() {
     let fx = prepared();
     let git = selective_git(&fx, "worktree add");
-    let out = fx.cwt().args(["new", "feat/x", "--json"]).env("CANOPYWT_GIT", git.as_str()).output().unwrap();
+    let out = fx.cwt().args(["new", "feat/x", "--json"]).env("CANOPYD_GIT", git.as_str()).output().unwrap();
 
     let value = err_envelope(&out.stdout, "worktree_create_failed");
     // git's own words survive; they are the part that says what to fix.
@@ -294,7 +294,7 @@ fn a_removal_that_git_refuses_is_reported_as_a_remove_failure() {
     fx.cwt().args(["new", "feat/x"]).output().unwrap();
 
     let git = selective_git(&fx, "worktree remove");
-    let out = fx.cwt().args(["rm", "feat/x", "--json"]).env("CANOPYWT_GIT", git.as_str()).output().unwrap();
+    let out = fx.cwt().args(["rm", "feat/x", "--json"]).env("CANOPYD_GIT", git.as_str()).output().unwrap();
 
     let value = err_envelope(&out.stdout, "worktree_remove_failed");
     assert!(value["error"]["message"].as_str().unwrap().contains("refused by the test"));
@@ -309,7 +309,7 @@ fn a_dirty_check_that_git_refuses_stops_the_removal() {
     fx.cwt().args(["new", "feat/x"]).output().unwrap();
 
     let git = selective_git(&fx, "status --porcelain=v1");
-    let out = fx.cwt().args(["rm", "feat/x", "--json"]).env("CANOPYWT_GIT", git.as_str()).output().unwrap();
+    let out = fx.cwt().args(["rm", "feat/x", "--json"]).env("CANOPYD_GIT", git.as_str()).output().unwrap();
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["ok"], false, "a removal proceeded without knowing whether the tree was dirty");
     assert!(fx.root.parent().unwrap().join("wt/feat-x").exists());
@@ -453,7 +453,7 @@ fn an_error_that_is_not_a_git_refusal_keeps_its_own_kind() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
     std::fs::set_permissions(&path, mode).unwrap();
 
-    let out = fx.cwt().args(["new", "feat/x", "--json"]).env("CANOPYWT_GIT", path.as_str()).output().unwrap();
+    let out = fx.cwt().args(["new", "feat/x", "--json"]).env("CANOPYD_GIT", path.as_str()).output().unwrap();
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["ok"], false);
     // `io`, not `worktree_create_failed`: the kind survived the mapping.
@@ -572,7 +572,7 @@ fn a_removal_that_git_refuses_after_the_dirty_check_keeps_its_own_kind() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
     std::fs::set_permissions(&path, mode).unwrap();
 
-    let out = fx.cwt().args(["rm", "feat/x", "--json"]).env("CANOPYWT_GIT", path.as_str()).output().unwrap();
+    let out = fx.cwt().args(["rm", "feat/x", "--json"]).env("CANOPYD_GIT", path.as_str()).output().unwrap();
     let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(value["ok"], false);
     assert_eq!(value["error"]["code"], "io", "the error's kind did not survive the mapping: {value}");
@@ -600,7 +600,7 @@ fn a_worktree_git_describes_with_neither_branch_nor_detached_is_still_listed() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o755);
     std::fs::set_permissions(&path, mode).unwrap();
 
-    let out = fx.cwt().arg("list").env("CANOPYWT_GIT", path.as_str()).output().unwrap();
+    let out = fx.cwt().arg("list").env("CANOPYD_GIT", path.as_str()).output().unwrap();
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("/tmp/odd-one"), "the path must be shown whatever the state: {text}");
     assert!(text.contains("(no branch)"), "an unnamed state should say so rather than print nothing: {text}");

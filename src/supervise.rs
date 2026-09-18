@@ -1,4 +1,4 @@
-//! `canopywt run` — the foreground supervisor.
+//! `canopyd run` — the foreground supervisor.
 //!
 //! [`crate::service::up`] starts services and returns; this blocks, keeps them alive, and stops
 //! them cleanly when the caller says so. Restart policy and continuous polling live here and

@@ -116,7 +116,7 @@ mod tests {
     // A bare number is ambiguous, so it is an error rather than a guess.
     #[case("5")]
     // Hours are not in the grammar the daemon accepts; silently supporting them here would
-    // make a file that works with canopywt fail in Canopy.
+    // make a file that works with canopyd fail in Canopy.
     #[case("5h")]
     #[case("")]
     #[case("s")]

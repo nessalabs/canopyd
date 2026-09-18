@@ -1,6 +1,6 @@
 //! Bringing a worktree's services up and down, with nothing running in between.
 //!
-//! `canopywt up` spawns a dev server and exits; the dev server keeps serving. There is no
+//! `canopyd up` spawns a dev server and exits; the dev server keeps serving. There is no
 //! daemon, no supervisor thread and no handle held anywhere, so every question asked later —
 //! *is it running? on what pid? is it serving?* — has to be answered from two files and the
 //! kernel:

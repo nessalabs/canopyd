@@ -66,7 +66,7 @@ fn assert_validates(validator: &Validator, yaml: &str) {
 // The schema accepts everything the parser does
 // -------------------------------------------------------------------------------------
 
-/// The real configs, plus the file `canopywt config init` hands a new user.
+/// The real configs, plus the file `canopyd config init` hands a new user.
 #[rstest]
 #[case("tests/data/canopy.dogfood.yaml", include_str!("data/canopy.dogfood.yaml"))]
 #[case("config::STARTER", config::STARTER)]
