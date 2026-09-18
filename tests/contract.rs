@@ -4,7 +4,7 @@
 
 mod fixture;
 
-use canopy_worktree::ErrorCode;
+use canopyd::ErrorCode;
 use fixture::Fixture;
 
 /// Every read-only command, for the table-driven envelope tests. Each new subcommand must be

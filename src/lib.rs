@@ -1,4 +1,4 @@
-//! `canopy-worktree` — git worktree dev environments driven by `canopy.yaml`.
+//! `canopyd` — git worktree dev environments driven by `canopy.yaml`.
 //!
 //! One crate, two faces: a library other Rust programs embed, and the `canopywt` binary. The
 //! binary is a printf over the library — every subcommand calls exactly one method here and

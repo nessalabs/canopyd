@@ -1,10 +1,10 @@
-# canopy-worktree
+# canopyd
 
 Work on several branches at once, each with its own running environment — its own ports, its own
 dependencies, its own dev server — described by one file and managed without a daemon.
 
 ```bash
-cargo install canopy-worktree   # installs the `canopywt` binary
+cargo install --git https://github.com/nessalabs/canopyd --locked   # installs the `canopywt` binary
 ```
 
 macOS and Linux.
@@ -97,7 +97,7 @@ result — so the JSON shape and the Rust API cannot drift apart.
 
 ```rust,no_run
 use camino::Utf8Path;
-use canopy_worktree::Canopy;
+use canopyd::Canopy;
 
 let canopy = Canopy::open(Utf8Path::new(".")).expect("inside a git repository");
 for entry in canopy.list().expect("git worktree list") {

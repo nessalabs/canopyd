@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use canopy_worktree::config::{self, Duration, TOP_LEVEL_KEYS};
+use canopyd::config::{self, Duration, TOP_LEVEL_KEYS};
 use jsonschema::Validator;
 use rstest::rstest;
 use serde_json::{Value, json};

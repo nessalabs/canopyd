@@ -7,12 +7,12 @@
 mod fixture;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use canopy_worktree::config::CanopyConfig;
-use canopy_worktree::git::Git;
-use canopy_worktree::paths::{self, PathVars};
-use canopy_worktree::repo::Repo;
-use canopy_worktree::worktree::{BranchSpec, CreateOptions, DeleteBranch, RemoveOptions};
-use canopy_worktree::{Canopy, Error, ErrorCode};
+use canopyd::config::CanopyConfig;
+use canopyd::git::Git;
+use canopyd::paths::{self, PathVars};
+use canopyd::repo::Repo;
+use canopyd::worktree::{BranchSpec, CreateOptions, DeleteBranch, RemoveOptions};
+use canopyd::{Canopy, Error, ErrorCode};
 use fixture::Fixture;
 
 /// Opens the fixture repo through the library, with git pinned the way the fixture pins it.
@@ -327,13 +327,12 @@ fn a_repo_can_be_discovered_and_driven_with_an_explicit_git_binary() {
 #[test]
 fn the_config_type_is_constructible_and_serializable_by_a_consumer() {
     // A UI receives this shape; it must round-trip through JSON without losing defaults.
-    let parsed =
-        canopy_worktree::parse_str("version: 1\nports:\n  web: {}\nservices:\n  a:\n    run: x ${ports.web}\n");
+    let parsed = canopyd::parse_str("version: 1\nports:\n  web: {}\nservices:\n  a:\n    run: x ${ports.web}\n");
     let config: &CanopyConfig = parsed.config.as_ref().unwrap();
     let json = serde_json::to_value(config).unwrap();
     assert_eq!(json["services"]["a"]["stop_timeout"], "10s");
     assert_eq!(json["env_file"], ".env.canopy");
-    assert_eq!(json["worktree"]["path"], canopy_worktree::config::WorktreeSpec::default().path);
+    assert_eq!(json["worktree"]["path"], canopyd::config::WorktreeSpec::default().path);
 }
 
 #[test]

@@ -3,7 +3,7 @@
 //! Prose goes stale quietly. Every complete `canopy.yaml` shown in the docs is parsed here, so
 //! an example that stops being valid fails the build instead of misleading whoever copies it.
 
-use canopy_worktree::parse_str;
+use canopyd::parse_str;
 
 /// Every fenced ```yaml block in a markdown file.
 fn yaml_blocks(markdown: &str) -> Vec<(usize, String)> {
@@ -68,7 +68,7 @@ fn configuration_reference_examples_are_valid() {
 fn the_starter_shown_by_config_init_is_the_one_documented() {
     // `config init` prints this; the configuration reference describes its defaults. If the
     // two drift, the first thing a new user does is read a description of something else.
-    let parsed = parse_str(canopy_worktree::config::STARTER);
+    let parsed = parse_str(canopyd::config::STARTER);
     assert!(parsed.is_valid(), "{:?}", parsed.errors().collect::<Vec<_>>());
     assert_eq!(parsed.warning_count(), 0);
 }
@@ -78,7 +78,7 @@ fn every_documented_error_code_exists() {
     // The JSON reference tabulates error codes; a code that is documented but not real sends
     // a consumer hunting for a branch that can never be taken.
     let doc = include_str!("../docs/json-api.md");
-    let known: Vec<&str> = canopy_worktree::ErrorCode::ALL.iter().map(|code| code.as_str()).collect();
+    let known: Vec<&str> = canopyd::ErrorCode::ALL.iter().map(|code| code.as_str()).collect();
 
     let mut documented = Vec::new();
     for line in doc.lines().filter(|line| line.starts_with("| `")) {

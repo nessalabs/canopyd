@@ -1,10 +1,10 @@
 [package]
-name = "canopy-worktree"
+name = "canopyd"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
-description = "Git worktree dev environments driven by canopy.yaml: create, provision and supervise a worktree without a daemon"
-repository = "https://github.com/igaurab/canopy-worktree"
+description = "Canopy's worktree manager: create, provision and supervise git worktree dev environments driven by canopy.yaml"
+repository = "https://github.com/nessalabs/canopyd"
 license = "MIT OR Apache-2.0"
 keywords = ["git", "worktree", "devenv", "cli"]
 categories = ["command-line-utilities", "development-tools"]
@@ -42,7 +42,7 @@ ureq = "3.4"
 [dev-dependencies]
 assert_cmd = "2.2"
 # This package, as its own dev-dependency: the only way to enable a feature for tests alone.
-canopy-worktree = { path = ".", features = ["ts"] }
+canopyd = { path = ".", features = ["ts"] }
 insta = { version = "1.48", features = ["json", "redactions"] }
 jsonschema = "0.56"
 predicates = "3.1"

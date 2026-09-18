@@ -232,12 +232,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "canopy-worktree"
+name = "canopyd"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "camino",
- "canopy-worktree",
+ "canopyd",
  "clap",
  "fs4",
  "globset",

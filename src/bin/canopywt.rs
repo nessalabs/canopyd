@@ -7,9 +7,9 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use camino::Utf8PathBuf;
-use canopy_worktree::error::Result;
-use canopy_worktree::wire::Envelope;
-use canopy_worktree::{Canopy, Error};
+use canopyd::error::Result;
+use canopyd::wire::Envelope;
+use canopyd::{Canopy, Error};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -220,12 +220,12 @@ enum DeleteBranchArg {
     Always,
 }
 
-impl From<DeleteBranchArg> for canopy_worktree::DeleteBranch {
+impl From<DeleteBranchArg> for canopyd::DeleteBranch {
     fn from(value: DeleteBranchArg) -> Self {
         match value {
-            DeleteBranchArg::Never => canopy_worktree::DeleteBranch::Never,
-            DeleteBranchArg::IfMerged => canopy_worktree::DeleteBranch::IfMerged,
-            DeleteBranchArg::Always => canopy_worktree::DeleteBranch::Always,
+            DeleteBranchArg::Never => canopyd::DeleteBranch::Never,
+            DeleteBranchArg::IfMerged => canopyd::DeleteBranch::IfMerged,
+            DeleteBranchArg::Always => canopyd::DeleteBranch::Always,
         }
     }
 }
@@ -367,17 +367,14 @@ fn run(cli: &Cli) -> Result<u8> {
 
         Command::New { ref branch, ref base, existing, ref path, ref name } => {
             let spec = if existing {
-                canopy_worktree::BranchSpec::Existing { name: branch.clone() }
+                canopyd::BranchSpec::Existing { name: branch.clone() }
             } else {
                 // Without an explicit base, fork from the repository's default branch. Falling
                 // back to "wherever HEAD happens to be" would silently branch off whatever the
                 // main checkout was last left on.
-                canopy_worktree::BranchSpec::New {
-                    name: branch.clone(),
-                    base: base.clone().or_else(|| canopy.default_base()),
-                }
+                canopyd::BranchSpec::New { name: branch.clone(), base: base.clone().or_else(|| canopy.default_base()) }
             };
-            let options = canopy_worktree::CreateOptions { path: path.clone(), name: name.clone() };
+            let options = canopyd::CreateOptions { path: path.clone(), name: name.clone() };
             let outcome = canopy.create(&spec, &options)?;
             if cli.json {
                 emit("new", &outcome);
@@ -392,7 +389,7 @@ fn run(cli: &Cli) -> Result<u8> {
         Command::Ports { ref branch, all, release } => {
             if all {
                 let path = canopy.ports_path();
-                let registry = canopy_worktree::ports::Registry::load(&path)?;
+                let registry = canopyd::ports::Registry::load(&path)?;
                 let rows: Vec<_> = registry.rows().to_vec();
                 if cli.json {
                     emit("ports", &rows);
@@ -430,9 +427,9 @@ fn run(cli: &Cli) -> Result<u8> {
             let worktree = worktree_path_for_branch(&canopy, &branch)?;
             let table = canopy.env_for(&branch, &worktree)?;
             if write {
-                let default_config = canopy_worktree::config::CanopyConfig::empty();
+                let default_config = canopyd::config::CanopyConfig::empty();
                 let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
-                let written = canopy_worktree::env::write_env_file(config, &worktree, &table)?;
+                let written = canopyd::env::write_env_file(config, &worktree, &table)?;
                 match written {
                     Some(path) if cli.json => emit("env", &serde_json::json!({ "written": path })),
                     Some(path) => println!("wrote {path}"),
@@ -452,34 +449,34 @@ fn run(cli: &Cli) -> Result<u8> {
 
         Command::Up { ref branch, ref only, no_wait } => {
             let (branch, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref())?;
-            let default_config = canopy_worktree::config::CanopyConfig::empty();
+            let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let facts = facts_owner.facts();
-            let ctx = canopy_worktree::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
+            let ctx = canopyd::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
             let only = selection(only);
-            let statuses = canopy_worktree::service::up(&config.services, only.as_ref(), &ctx, !no_wait)?;
+            let statuses = canopyd::service::up(&config.services, only.as_ref(), &ctx, !no_wait)?;
             report_services(cli, "up", &statuses);
             let _ = branch;
         }
 
         Command::Down { ref branch, ref only } => {
             let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref())?;
-            let default_config = canopy_worktree::config::CanopyConfig::empty();
+            let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let facts = facts_owner.facts();
-            let ctx = canopy_worktree::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
+            let ctx = canopyd::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
             let only = selection(only);
-            let statuses = canopy_worktree::service::down(&config.services, only.as_ref(), &ctx)?;
+            let statuses = canopyd::service::down(&config.services, only.as_ref(), &ctx)?;
             report_services(cli, "down", &statuses);
         }
 
         Command::Ps { ref branch } => {
             let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref())?;
-            let default_config = canopy_worktree::config::CanopyConfig::empty();
+            let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let facts = facts_owner.facts();
-            let ctx = canopy_worktree::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
-            let statuses = canopy_worktree::service::status(&config.services, None, &ctx)?;
+            let ctx = canopyd::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
+            let statuses = canopyd::service::status(&config.services, None, &ctx)?;
             report_services(cli, "ps", &statuses);
         }
 
@@ -491,16 +488,11 @@ fn run(cli: &Cli) -> Result<u8> {
                 // condition is checked on every poll, not only between lines.
                 let interrupted = interrupt_flag()?;
                 let mut out = |line: &str| println!("{line}");
-                canopy_worktree::service::follow(
-                    &state,
-                    service,
-                    lines,
-                    canopy_worktree::service::FOLLOW_POLL,
-                    &mut out,
-                    &|| !interrupted.load(std::sync::atomic::Ordering::Relaxed),
-                )?;
+                canopyd::service::follow(&state, service, lines, canopyd::service::FOLLOW_POLL, &mut out, &|| {
+                    !interrupted.load(std::sync::atomic::Ordering::Relaxed)
+                })?;
             } else {
-                let tail = canopy_worktree::service::logs(&state, service, lines)?;
+                let tail = canopyd::service::logs(&state, service, lines)?;
                 if cli.json {
                     emit("logs", &tail);
                 } else {
@@ -525,20 +517,15 @@ fn run(cli: &Cli) -> Result<u8> {
                     Error::WorktreeNotFound("a bare repository has no checkout to copy from".to_owned())
                 })?,
             };
-            let default_config = canopy_worktree::config::CanopyConfig::empty();
+            let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             // `--rule` wins over the config's `copy:`, for an embedder that keeps its own rules
             // — the same reason `--path` exists for one that owns its own layout.
             let overrides = parse_rules(rules)?;
             let rules = if overrides.is_empty() { &config.copy } else { &overrides };
-            let options = canopy_worktree::copy::CopyOptions { dry_run, source: source.clone() };
-            let outcome = canopy_worktree::copy::copy_ignored(
-                &canopy_worktree::git::Git::default(),
-                &source,
-                &target,
-                rules,
-                &options,
-            )?;
+            let options = canopyd::copy::CopyOptions { dry_run, source: source.clone() };
+            let outcome =
+                canopyd::copy::copy_ignored(&canopyd::git::Git::default(), &source, &target, rules, &options)?;
 
             if cli.json {
                 emit("copy", &outcome);
@@ -567,11 +554,11 @@ fn run(cli: &Cli) -> Result<u8> {
             if !worktree.exists() {
                 return Err(Error::WorktreeNotFound(format!("{branch} has no checkout at {worktree}")));
             }
-            let default_config = canopy_worktree::config::CanopyConfig::empty();
+            let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let timeout = match timeout {
-                Some(text) => Some(canopy_worktree::config::Duration::parse(text).map_err(|error| Error::Module {
-                    code: canopy_worktree::ErrorCode::ConfigInvalid,
+                Some(text) => Some(canopyd::config::Duration::parse(text).map_err(|error| Error::Module {
+                    code: canopyd::ErrorCode::ConfigInvalid,
                     message: error.to_string(),
                 })?),
                 None => None,
@@ -581,7 +568,7 @@ fn run(cli: &Cli) -> Result<u8> {
             for (key, value) in parse_env(env_overrides)? {
                 env.insert(key, value);
             }
-            let options = canopy_worktree::SetupOptions {
+            let options = canopyd::SetupOptions {
                 worktree: &worktree,
                 // The main checkout is what a worktree was made from, so it is what
                 // `if_changed` compares against.
@@ -595,22 +582,22 @@ fn run(cli: &Cli) -> Result<u8> {
             // Streamed to stderr as it happens: a four-minute `npm ci` that prints nothing
             // until it finishes looks like a hang. stdout stays clean for the envelope.
             let quiet = cli.quiet;
-            let mut on_line = |_stream: canopy_worktree::Stream, text: &str| {
+            let mut on_line = |_stream: canopyd::Stream, text: &str| {
                 if !quiet {
                     let _ = writeln!(std::io::stderr(), "{text}");
                 }
             };
-            let outcome = canopy_worktree::run_setup(&config.setup, &options, &mut on_line)?;
+            let outcome = canopyd::run_setup(&config.setup, &options, &mut on_line)?;
 
             if cli.json {
                 // A verdict, like `config check`: the run happened, and the answer may be no.
                 // `data` carries every step either way, so a caller reads one shape.
                 let failure = outcome.steps.iter().find_map(|step| match &step.result {
-                    canopy_worktree::StepResult::Failed { status, .. } => Some((step.name.clone(), status.clone())),
+                    canopyd::StepResult::Failed { status, .. } => Some((step.name.clone(), status.clone())),
                     _ => None,
                 });
-                let error = failure.map(|(name, status)| canopy_worktree::wire::ErrorBody {
-                    code: canopy_worktree::ErrorCode::SetupFailed.as_str(),
+                let error = failure.map(|(name, status)| canopyd::wire::ErrorBody {
+                    code: canopyd::ErrorCode::SetupFailed.as_str(),
                     message: format!("setup step {name} failed ({status})"),
                     details: None,
                 });
@@ -636,12 +623,12 @@ fn run(cli: &Cli) -> Result<u8> {
             ref restart_window,
         } => {
             let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref())?;
-            let default_config = canopy_worktree::config::CanopyConfig::empty();
+            let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let facts = facts_owner.facts();
-            let ctx = canopy_worktree::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
+            let ctx = canopyd::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
 
-            let mut opts = canopy_worktree::SuperviseOptions { restart: !no_restart, ..Default::default() };
+            let mut opts = canopyd::SuperviseOptions { restart: !no_restart, ..Default::default() };
             if let Some(text) = poll {
                 opts.poll = duration_arg(text)?;
             }
@@ -665,7 +652,7 @@ fn run(cli: &Cli) -> Result<u8> {
 
             let quiet = cli.quiet;
             let json = cli.json;
-            let mut on_event = |event: canopy_worktree::Event| {
+            let mut on_event = |event: canopyd::Event| {
                 if json {
                     // One event per line on stderr: stdout is the final envelope, and a caller
                     // following along wants the events as they happen rather than at the end.
@@ -679,8 +666,8 @@ fn run(cli: &Cli) -> Result<u8> {
                 }
             };
 
-            let clock = canopy_worktree::health::SystemClock::new();
-            let outcome = canopy_worktree::supervise::run(
+            let clock = canopyd::health::SystemClock::new();
+            let outcome = canopyd::supervise::run(
                 &config.services,
                 selection(only).as_ref(),
                 &ctx,
@@ -698,16 +685,15 @@ fn run(cli: &Cli) -> Result<u8> {
         }
 
         Command::Doctor => {
-            let report = canopy_worktree::doctor::diagnose(canopy.repo(), &canopy.state_root(), &canopy.ports_path())?;
+            let report = canopyd::doctor::diagnose(canopy.repo(), &canopy.state_root(), &canopy.ports_path())?;
             // Only an error fails the command. A warning is debris `gc` sweeps as a matter of
             // course, and exiting non-zero for it would make `doctor` useless in CI — the place
             // you actually want it to mean "someone has to look at this".
-            let errors =
-                report.findings.iter().filter(|f| f.severity == canopy_worktree::FindingSeverity::Error).count();
+            let errors = report.findings.iter().filter(|f| f.severity == canopyd::FindingSeverity::Error).count();
 
             if cli.json {
-                let error = (errors > 0).then(|| canopy_worktree::wire::ErrorBody {
-                    code: canopy_worktree::ErrorCode::RepositoryUnhealthy.as_str(),
+                let error = (errors > 0).then(|| canopyd::wire::ErrorBody {
+                    code: canopyd::ErrorCode::RepositoryUnhealthy.as_str(),
                     message: format!("{errors} finding(s) need attention"),
                     details: None,
                 });
@@ -735,8 +721,8 @@ fn run(cli: &Cli) -> Result<u8> {
             let state_root = canopy.state_root();
             let ports = canopy.ports_path();
             let swept = match log_cap {
-                Some(cap) => canopy_worktree::doctor::gc_with(canopy.repo(), &state_root, &ports, cap)?,
-                None => canopy_worktree::doctor::gc(canopy.repo(), &state_root, &ports)?,
+                Some(cap) => canopyd::doctor::gc_with(canopy.repo(), &state_root, &ports, cap)?,
+                None => canopyd::doctor::gc(canopy.repo(), &state_root, &ports)?,
             };
             if cli.json {
                 emit("gc", &swept);
@@ -754,7 +740,7 @@ fn run(cli: &Cli) -> Result<u8> {
             // Stop anything still running before the checkout goes, or a dev server keeps
             // writing into a directory that no longer exists.
             let stopped = stop_services_for(&canopy, target).unwrap_or_default();
-            let options = canopy_worktree::RemoveOptions { force, delete_branch: delete_branch.into() };
+            let options = canopyd::RemoveOptions { force, delete_branch: delete_branch.into() };
             let outcome = canopy.remove(target, &options)?;
             // Hand the ports back. Without this the registry accumulates rows for worktrees
             // that no longer exist and slowly exhausts the range.
@@ -828,7 +814,7 @@ fn run_config(cli: &Cli, canopy: &Canopy, command: &ConfigCommand) -> Result<u8>
             let (label, parsed) = if *stdin {
                 let mut text = String::new();
                 std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
-                ("<stdin>".to_owned(), canopy_worktree::parse_str(&text))
+                ("<stdin>".to_owned(), canopyd::parse_str(&text))
             } else {
                 let Some((located, parsed)) = canopy.config() else {
                     return Err(Error::ConfigNotFound(searched_description(canopy)));
@@ -852,8 +838,8 @@ fn run_config(cli: &Cli, canopy: &Canopy, command: &ConfigCommand) -> Result<u8>
                     "config check",
                     parsed.is_valid(),
                     &report,
-                    (!parsed.is_valid()).then(|| canopy_worktree::wire::ErrorBody {
-                        code: canopy_worktree::ErrorCode::ConfigInvalid.as_str(),
+                    (!parsed.is_valid()).then(|| canopyd::wire::ErrorBody {
+                        code: canopyd::ErrorCode::ConfigInvalid.as_str(),
                         message: format!("canopy.yaml has {} error(s)", parsed.error_count()),
                         details: None,
                     }),
@@ -862,8 +848,8 @@ fn run_config(cli: &Cli, canopy: &Canopy, command: &ConfigCommand) -> Result<u8>
             } else {
                 for diagnostic in &parsed.diagnostics {
                     let severity = match diagnostic.severity {
-                        canopy_worktree::Severity::Error => "error",
-                        canopy_worktree::Severity::Warning => "warning",
+                        canopyd::Severity::Error => "error",
+                        canopyd::Severity::Warning => "warning",
                     };
                     let position = match (diagnostic.line, diagnostic.column) {
                         (Some(line), Some(column)) => format!("{label}:{line}:{column}"),
@@ -893,14 +879,14 @@ struct CheckReport<'a> {
     valid: bool,
     errors: usize,
     warnings: usize,
-    diagnostics: &'a [canopy_worktree::Diagnostic],
+    diagnostics: &'a [canopyd::Diagnostic],
 }
 
-fn source_label(source: canopy_worktree::ConfigSource) -> &'static str {
+fn source_label(source: canopyd::ConfigSource) -> &'static str {
     match source {
-        canopy_worktree::ConfigSource::Worktree => "this worktree",
-        canopy_worktree::ConfigSource::MainCheckout => "the main checkout",
-        canopy_worktree::ConfigSource::UserConfig => "your user config",
+        canopyd::ConfigSource::Worktree => "this worktree",
+        canopyd::ConfigSource::MainCheckout => "the main checkout",
+        canopyd::ConfigSource::UserConfig => "your user config",
     }
 }
 
@@ -917,12 +903,12 @@ fn parse_env(raw: &[String]) -> Result<Vec<(String, String)>> {
     raw.iter()
         .map(|text| {
             let (key, value) = text.split_once('=').ok_or_else(|| Error::Module {
-                code: canopy_worktree::ErrorCode::ConfigInvalid,
+                code: canopyd::ErrorCode::ConfigInvalid,
                 message: format!("--env needs KEY=VALUE, got {text:?}"),
             })?;
             if key.is_empty() {
                 return Err(Error::Module {
-                    code: canopy_worktree::ErrorCode::ConfigInvalid,
+                    code: canopyd::ErrorCode::ConfigInvalid,
                     message: "--env needs a name before the =".to_owned(),
                 });
             }
@@ -932,7 +918,7 @@ fn parse_env(raw: &[String]) -> Result<Vec<(String, String)>> {
 }
 
 /// `pattern` or `pattern=strategy`, the spelling `--rule` takes.
-fn parse_rules(raw: &[String]) -> Result<Vec<canopy_worktree::config::CopyRule>> {
+fn parse_rules(raw: &[String]) -> Result<Vec<canopyd::config::CopyRule>> {
     raw.iter()
         .map(|text| {
             let (pattern, strategy) = match text.split_once('=') {
@@ -940,23 +926,23 @@ fn parse_rules(raw: &[String]) -> Result<Vec<canopy_worktree::config::CopyRule>>
                 None => (text.as_str(), "copy"),
             };
             let strategy = match strategy {
-                "copy" => canopy_worktree::config::CopyStrategy::Copy,
-                "clone" => canopy_worktree::config::CopyStrategy::Clone,
-                "symlink" => canopy_worktree::config::CopyStrategy::Symlink,
+                "copy" => canopyd::config::CopyStrategy::Copy,
+                "clone" => canopyd::config::CopyStrategy::Clone,
+                "symlink" => canopyd::config::CopyStrategy::Symlink,
                 other => {
                     return Err(Error::Module {
-                        code: canopy_worktree::ErrorCode::ConfigInvalid,
+                        code: canopyd::ErrorCode::ConfigInvalid,
                         message: format!("unknown copy strategy {other:?}; use copy, clone or symlink"),
                     });
                 }
             };
             if pattern.is_empty() {
                 return Err(Error::Module {
-                    code: canopy_worktree::ErrorCode::ConfigInvalid,
+                    code: canopyd::ErrorCode::ConfigInvalid,
                     message: "a copy rule needs a pattern".to_owned(),
                 });
             }
-            Ok(canopy_worktree::config::CopyRule { pattern: pattern.to_owned(), strategy })
+            Ok(canopyd::config::CopyRule { pattern: pattern.to_owned(), strategy })
         })
         .collect()
 }
@@ -972,8 +958,8 @@ struct FactsOwner {
 }
 
 impl FactsOwner {
-    fn facts(&self) -> canopy_worktree::env::Facts<'_> {
-        canopy_worktree::env::Facts {
+    fn facts(&self) -> canopyd::env::Facts<'_> {
+        canopyd::env::Facts {
             worktree_name: &self.name,
             worktree_path: &self.worktree,
             branch: &self.branch,
@@ -984,7 +970,7 @@ impl FactsOwner {
     }
 }
 
-type ServiceSetup = (String, Utf8PathBuf, Utf8PathBuf, canopy_worktree::EnvTable, FactsOwner);
+type ServiceSetup = (String, Utf8PathBuf, Utf8PathBuf, canopyd::EnvTable, FactsOwner);
 
 /// Resolves the branch, its checkout, its state directory and its environment in one place,
 /// since every service command needs all four.
@@ -1036,24 +1022,23 @@ impl ConfigCommand {
 /// consumer would have to unwrap it before use.
 fn print_document(document: Document) -> u8 {
     match document {
-        Document::Starter => print!("{}", canopy_worktree::config::STARTER),
-        Document::Schema => println!("{}", canopy_worktree::config::schema::json_schema().trim_end()),
+        Document::Starter => print!("{}", canopyd::config::STARTER),
+        Document::Schema => println!("{}", canopyd::config::schema::json_schema().trim_end()),
     }
     0
 }
 
 /// A `--flag 5s` value, with the grammar named in the error rather than a bare "invalid".
-fn duration_arg(text: &str) -> Result<canopy_worktree::config::Duration> {
-    canopy_worktree::config::Duration::parse(text)
-        .map_err(|error| Error::Module { code: canopy_worktree::ErrorCode::ConfigInvalid, message: error.to_string() })
+fn duration_arg(text: &str) -> Result<canopyd::config::Duration> {
+    canopyd::config::Duration::parse(text)
+        .map_err(|error| Error::Module { code: canopyd::ErrorCode::ConfigInvalid, message: error.to_string() })
 }
 
 /// git's answer for the hooks directory, which honours `core.hooksPath`. Guessing
 /// `.git/hooks` would install into a directory git is not reading.
 fn hooks_dir(canopy: &Canopy) -> Result<Utf8PathBuf> {
     let cwd = canopy.repo().root.clone().unwrap_or_else(|| canopy.repo().common_dir.clone());
-    let out = canopy_worktree::git::Git::default()
-        .run(&cwd, ["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
+    let out = canopyd::git::Git::default().run(&cwd, ["rev-parse", "--path-format=absolute", "--git-path", "hooks"])?;
     Ok(Utf8PathBuf::from(out.trim()))
 }
 
@@ -1066,7 +1051,7 @@ fn run_hook(cli: &Cli, canopy: &Canopy, command: &HookCommand) -> Result<u8> {
                 .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
                 .map(|path| path.to_string())
                 .unwrap_or_else(|| "canopywt".to_owned());
-            let path = canopy_worktree::hook::install(&dir, &binary)?;
+            let path = canopyd::hook::install(&dir, &binary)?;
             if cli.json {
                 emit("hook install", &serde_json::json!({ "path": path }));
             } else {
@@ -1075,7 +1060,7 @@ fn run_hook(cli: &Cli, canopy: &Canopy, command: &HookCommand) -> Result<u8> {
         }
         HookCommand::Uninstall => {
             let dir = hooks_dir(canopy)?;
-            let removed = canopy_worktree::hook::uninstall(&dir)?;
+            let removed = canopyd::hook::uninstall(&dir)?;
             if cli.json {
                 emit("hook uninstall", &serde_json::json!({ "removed": removed }));
             } else {
@@ -1084,11 +1069,11 @@ fn run_hook(cli: &Cli, canopy: &Canopy, command: &HookCommand) -> Result<u8> {
         }
         HookCommand::Status => {
             let dir = hooks_dir(canopy)?;
-            let installed = canopy_worktree::hook::is_installed(&dir);
+            let installed = canopyd::hook::is_installed(&dir);
             if cli.json {
                 emit(
                     "hook status",
-                    &serde_json::json!({ "installed": installed, "path": canopy_worktree::hook::hook_path(&dir) }),
+                    &serde_json::json!({ "installed": installed, "path": canopyd::hook::hook_path(&dir) }),
                 );
             } else {
                 println!("{}", if installed { "installed" } else { "not installed" });
@@ -1096,11 +1081,11 @@ fn run_hook(cli: &Cli, canopy: &Canopy, command: &HookCommand) -> Result<u8> {
         }
         HookCommand::PostCheckout { old, new, flag } => {
             let cwd = canopy.repo().root.clone().unwrap_or_else(|| canopy.repo().common_dir.clone());
-            let no_hook = std::env::var_os(canopy_worktree::hook::NO_HOOK_ENV).is_some();
-            let trigger = canopy_worktree::hook::classify(old, new, flag, &cwd, no_hook);
+            let no_hook = std::env::var_os(canopyd::hook::NO_HOOK_ENV).is_some();
+            let trigger = canopyd::hook::classify(old, new, flag, &cwd, no_hook);
             if cli.json {
                 emit("hook post-checkout", &trigger);
-            } else if let canopy_worktree::hook::Trigger::WorktreeAdded = trigger {
+            } else if let canopyd::hook::Trigger::WorktreeAdded = trigger {
                 println!("canopywt: new worktree at {cwd}");
             }
             // Never anything but 0. git cannot abort a checkout, the hooks directory is shared
@@ -1117,11 +1102,11 @@ fn stop_services_for(canopy: &Canopy, target: &str) -> Result<Vec<String>> {
     let Ok((_, worktree, state, env, owner)) = service_context(canopy, Some(target)) else {
         return Ok(Vec::new());
     };
-    let default_config = canopy_worktree::config::CanopyConfig::empty();
+    let default_config = canopyd::config::CanopyConfig::empty();
     let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
     let facts = owner.facts();
-    let ctx = canopy_worktree::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
-    let statuses = canopy_worktree::service::down(&config.services, None, &ctx)?;
+    let ctx = canopyd::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
+    let statuses = canopyd::service::down(&config.services, None, &ctx)?;
     Ok(statuses.into_iter().map(|status| status.name).collect())
 }
 
@@ -1143,7 +1128,7 @@ fn interrupt_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
     Ok(flag)
 }
 
-fn report_services(cli: &Cli, command: &str, statuses: &[canopy_worktree::ServiceStatus]) {
+fn report_services(cli: &Cli, command: &str, statuses: &[canopyd::ServiceStatus]) {
     if cli.json {
         emit(command, &statuses);
         return;
@@ -1160,11 +1145,11 @@ fn report_services(cli: &Cli, command: &str, statuses: &[canopy_worktree::Servic
 }
 
 /// One line per step, for the human view.
-fn describe_step(step: &canopy_worktree::StepOutcome) -> String {
+fn describe_step(step: &canopyd::StepOutcome) -> String {
     match &step.result {
-        canopy_worktree::StepResult::Ran { millis } => format!("ran      {} ({millis}ms)", step.name),
-        canopy_worktree::StepResult::Skipped { reason } => format!("skipped  {} — {reason}", step.name),
-        canopy_worktree::StepResult::Failed { status, millis, .. } => {
+        canopyd::StepResult::Ran { millis } => format!("ran      {} ({millis}ms)", step.name),
+        canopyd::StepResult::Skipped { reason } => format!("skipped  {} — {reason}", step.name),
+        canopyd::StepResult::Failed { status, millis, .. } => {
             format!("FAILED   {} ({status}, {millis}ms)", step.name)
         }
     }

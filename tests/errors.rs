@@ -6,11 +6,11 @@
 //! there being no scenario for it yet.
 
 use camino::Utf8PathBuf;
-use canopy_worktree::copy::CopyError;
-use canopy_worktree::env::EnvError;
-use canopy_worktree::ports::PortError;
-use canopy_worktree::worktree::DirtyCounts;
-use canopy_worktree::{Error, ErrorCode};
+use canopyd::copy::CopyError;
+use canopyd::env::EnvError;
+use canopyd::ports::PortError;
+use canopyd::worktree::DirtyCounts;
+use canopyd::{Error, ErrorCode};
 
 fn path() -> Utf8PathBuf {
     Utf8PathBuf::from("/tmp/wt")
@@ -236,7 +236,7 @@ where
 
 #[test]
 fn a_doctor_error_keeps_its_code() {
-    use canopy_worktree::doctor::DoctorError;
+    use canopyd::doctor::DoctorError;
     // A git failure while diagnosing is still a git failure; flattening it would hide which
     // half of `doctor` went wrong.
     bridges(
@@ -253,7 +253,7 @@ fn a_doctor_error_keeps_its_code() {
 
 #[test]
 fn a_hook_error_keeps_its_code() {
-    use canopy_worktree::hook::HookError;
+    use canopyd::hook::HookError;
     // Refusing to clobber someone's hook is a setup action that could not be carried out, not
     // an I/O fault — the distinction is what tells a caller whether retrying could help.
     bridges(HookError::Foreign { path: path(), snippet: "paste me".into() }, ErrorCode::SetupFailed);
@@ -262,7 +262,7 @@ fn a_hook_error_keeps_its_code() {
 
 #[test]
 fn a_proc_error_keeps_its_code() {
-    use canopy_worktree::proc::ProcError;
+    use canopyd::proc::ProcError;
     // A service whose log will not open cannot start, so both of these are the service
     // failing rather than the machine — which is what tells a caller to look at the service.
     bridges(
@@ -278,7 +278,7 @@ fn a_proc_error_keeps_its_code() {
 
 #[test]
 fn a_setup_error_separates_a_bad_config_from_a_bad_machine() {
-    use canopy_worktree::setup::SetupError;
+    use canopyd::setup::SetupError;
     // A glob that will not compile and a step named by a typo are the config being wrong; the
     // user fixes those in the file, not on the machine.
     bridges(SetupError::BadPattern { pattern: "[".into(), source: globset_error() }, ErrorCode::ConfigInvalid);

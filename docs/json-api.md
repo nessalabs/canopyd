@@ -178,7 +178,7 @@ result — so linking the crate gives you the same answers without a subprocess 
 
 ```rust,no_run
 use camino::Utf8Path;
-use canopy_worktree::Canopy;
+use canopyd::Canopy;
 
 let canopy = Canopy::open(Utf8Path::new(".")).expect("inside a git repository");
 

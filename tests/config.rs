@@ -1,6 +1,6 @@
 //! M2: `canopy.yaml` parsing and linting.
 
-use canopy_worktree::config::{self, CanopyConfig, EnvFile, Runtime, Severity, parse_str};
+use canopyd::config::{self, CanopyConfig, EnvFile, Runtime, Severity, parse_str};
 
 /// Parses and asserts the file is clean, returning the config.
 fn valid(text: &str) -> CanopyConfig {
