@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use super::{CanopyConfig, DbAdapter, EnvFile, Runtime, ServiceSpec};
+use super::{CanopyConfig, EnvFile, Runtime, ServiceSpec};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -376,17 +376,6 @@ pub fn lint(config: &CanopyConfig) -> Vec<Diagnostic> {
 
     for (name, db) in &config.databases {
         let where_ = format!("databases.{name}");
-        // `db fork` refuses the whole set over one of these, so the warning is the early notice.
-        let unsupported = match db.adapter {
-            DbAdapter::Sqlite | DbAdapter::Postgres => None,
-            DbAdapter::Mysql => Some("mysql"),
-            DbAdapter::Redis => Some("redis"),
-        };
-        if let Some(adapter) = unsupported {
-            let message =
-                format!("adapter {adapter} is not supported by this version of canopyd — `db fork` will refuse it");
-            out.push(Diagnostic::warning(&where_, message));
-        }
         if db.seed.as_ref().is_some_and(|s| [&s.dump, &s.sql, &s.command].iter().filter(|v| v.is_some()).count() > 1) {
             out.push(Diagnostic::error(&format!("{where_}.seed"), "use one of `dump`, `sql` or `command`"));
         }

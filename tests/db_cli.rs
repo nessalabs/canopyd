@@ -192,33 +192,31 @@ fn removing_a_worktree_takes_its_forks_with_it() {
 }
 
 #[test]
-fn an_adapter_this_version_cannot_drive_is_refused_and_warned_about() {
+fn forks_are_all_made_or_none_are() {
+    // A server database needs docker, and tests are pinned to one that does not exist. The
+    // SQLite fork beside it needs nothing — and still must not be made, or a worktree pointed
+    // at the shared server database would look provisioned.
     let fx = Fixture::new();
     fx.commit(
-        &[("canopy.yaml", "version: 1\ndatabases:\n  main:\n    adapter: redis\n  local:\n    adapter: sqlite\n")],
+        &[("canopy.yaml", "version: 1\ndatabases:\n  cache:\n    adapter: redis\n  local:\n    adapter: sqlite\n")],
         "config",
     );
 
     let out = fx.cwt().args(["db", "fork", "main", "--json"]).output().unwrap();
-    let envelope = err_envelope(&out.stdout, "db_unsupported");
-    assert!(envelope["error"]["message"].as_str().unwrap().contains("adapter redis"), "{envelope}");
-    assert_eq!(
-        run(&fx, &["db", "ls", "main"]),
-        serde_json::json!([]),
-        "and nothing was forked, not even the sqlite one"
-    );
+    let envelope = err_envelope(&out.stdout, "db_failed");
+    let message = envelope["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("database cache: docker is not available"), "{envelope}");
+    assert_eq!(run(&fx, &["db", "ls", "main"]), serde_json::json!([]));
 
+    // Every adapter is driven, so none of them is a lint warning any more.
     let check = fx.cwt().args(["config", "check", "--json"]).output().unwrap();
-    let diagnostics: Vec<serde_json::Value> = ok_envelope(&check.stdout)["data"]["diagnostics"]
+    let about_databases = ok_envelope(&check.stdout)["data"]["diagnostics"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|d| d["path"].as_str().unwrap().starts_with("databases"))
-        .cloned()
-        .collect();
-    let paths: Vec<&str> = diagnostics.iter().map(|d| d["path"].as_str().unwrap()).collect();
-    assert_eq!(paths, ["databases.main"], "sqlite is supported and says nothing: {diagnostics:?}");
-    assert!(diagnostics[0]["message"].as_str().unwrap().contains("adapter redis is not supported"));
+        .count();
+    assert_eq!(about_databases, 0);
 }
 
 #[test]

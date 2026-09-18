@@ -14,12 +14,14 @@
 //! - **The record is believed only as far as the fork can be seen.** A recorded fork whose file
 //!   is gone reports `missing`, and its URL is kept out of the environment: a service started
 //!   against a database that is not there fails in a way that points everywhere but here.
-//! - **An adapter this version cannot drive is an error, not a skip.** A `postgres` entry that
-//!   was silently passed over would leave the worktree pointed at whatever `DATABASE_URL` the
-//!   shell had — the shared database, exactly what the fork exists to prevent.
+//! - **All of them or none.** Whether each fork *can* be made is asked before any is: a server
+//!   database that was passed over because docker is off would leave the worktree pointed at
+//!   whatever `DATABASE_URL` the shell had — the shared database, exactly what the fork exists
+//!   to prevent — beside a SQLite fork that makes everything look provisioned.
 //!
-//! SQLite is the first adapter because a fork is a file copy: no engine, no port, no container,
-//! and dropping it is an unlink.
+//! Four engines, three shapes. SQLite is a file, so a fork is a copy. Postgres can clone a
+//! database inside a server, so there is one server and a template. MySQL and Redis can do
+//! neither, so each fork is a small server of its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -30,7 +32,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::{DatabaseSpec, DbAdapter};
 use crate::error::ErrorCode;
 
+mod mysql;
 mod postgres;
+mod redis;
 
 /// The record of what was forked, inside a worktree's state directory.
 const REGISTRY: &str = "databases.json";
@@ -46,8 +50,6 @@ const SIDECARS: [&str; 2] = ["-wal", "-shm"];
 pub enum DbError {
     #[error("no database named {0} in canopy.yaml")]
     Unknown(String),
-    #[error("database {name}: adapter {adapter} is not supported by this version of canopyd")]
-    Unsupported { name: String, adapter: &'static str },
     #[error("database {name}: {branch} has no fork of it to copy")]
     NoSourceFork { name: String, branch: String },
     #[error("{path}: {source}")]
@@ -69,7 +71,6 @@ impl DbError {
     pub fn code(&self) -> ErrorCode {
         match self {
             DbError::Unknown(_) => ErrorCode::ConfigInvalid,
-            DbError::Unsupported { .. } => ErrorCode::DbUnsupported,
             DbError::NoSourceFork { .. }
             | DbError::Registry { .. }
             | DbError::Engine { .. }
@@ -115,6 +116,10 @@ pub struct DbContext<'a> {
     pub state: &'a Utf8Path,
     /// The worktree's resolved environment, for a seed `command:`.
     pub env: &'a BTreeMap<String, String>,
+    /// The worktree's branch and the port registry: a fork that is its own server takes a port
+    /// from the same place the worktree's services do, so it is stable and handed back with them.
+    pub branch: &'a str,
+    pub ports: &'a Utf8Path,
 }
 
 /// Whether a recorded fork is still there.
@@ -216,15 +221,16 @@ fn selection<'a>(
     Ok(databases.iter().filter(|(name, _)| only.is_none_or(|names| names.contains(*name))).collect())
 }
 
-/// `Err` for an adapter this version cannot drive. Checked for every selected database before
-/// any of them is touched, so a config with one unsupported entry forks nothing rather than half.
-fn supported(name: &str, spec: &DatabaseSpec) -> Result<(), DbError> {
-    let adapter = match spec.adapter {
-        DbAdapter::Sqlite | DbAdapter::Postgres => return Ok(()),
-        DbAdapter::Mysql => "mysql",
-        DbAdapter::Redis => "redis",
-    };
-    Err(DbError::Unsupported { name: name.to_owned(), adapter })
+/// Whether a fork of `spec` could be made at all right now. Asked for every selected database
+/// before any of them is touched, so a machine with docker off forks nothing rather than half,
+/// and a `reset` does not drop a working fork it then cannot replace.
+fn preflight(name: &str, spec: &DatabaseSpec, ctx: &DbContext<'_>) -> Result<(), DbError> {
+    match spec.adapter {
+        DbAdapter::Sqlite => Ok(()),
+        DbAdapter::Postgres => postgres::preflight(name, ctx),
+        DbAdapter::Mysql => mysql::preflight(name, ctx),
+        DbAdapter::Redis => redis::preflight(name, ctx),
+    }
 }
 
 /// Forks every selected database that does not already have a fork, and reports all of them.
@@ -238,10 +244,16 @@ pub fn fork(
     source: &ForkSource<'_>,
 ) -> Result<Vec<DbInstance>, DbError> {
     let chosen = selection(databases, only)?;
-    for (name, spec) in &chosen {
-        supported(name, spec)?;
-    }
     let mut recorded = read_registry(ctx.state)?;
+    for (name, spec) in &chosen {
+        // Only for what is about to be made: a fork that is there needs nothing from docker.
+        let there = recorded
+            .iter()
+            .any(|instance| &instance.name == *name && observe(instance, ctx, true).status == ForkStatus::Ready);
+        if !there {
+            preflight(name, spec, ctx)?;
+        }
+    }
     let mut out = Vec::with_capacity(chosen.len());
     for (name, spec) in chosen {
         let existing =
@@ -249,9 +261,10 @@ pub fn fork(
         let instance = match existing {
             Some(instance) if instance.status == ForkStatus::Ready => instance,
             _ => match spec.adapter {
+                DbAdapter::Sqlite => sqlite_fork(name, spec, ctx, source)?,
                 DbAdapter::Postgres => postgres::fork(name, spec, ctx, source)?,
-                // `supported` has already refused the rest.
-                DbAdapter::Sqlite | DbAdapter::Mysql | DbAdapter::Redis => sqlite_fork(name, spec, ctx, source)?,
+                DbAdapter::Mysql => mysql::fork(name, spec, ctx, source)?,
+                DbAdapter::Redis => redis::fork(name, spec, ctx, source)?,
             },
         };
         recorded.retain(|other| other.name != instance.name);
@@ -279,8 +292,13 @@ pub fn refresh_templates(
 ) -> Result<Vec<String>, DbError> {
     let mut rebuilt = Vec::new();
     for (name, spec) in selection(databases, only)? {
-        if spec.adapter == DbAdapter::Postgres {
-            rebuilt.push(postgres::refresh_template(name, spec, ctx)?);
+        match spec.adapter {
+            DbAdapter::Postgres => rebuilt.push(postgres::refresh_template(name, spec, ctx)?),
+            DbAdapter::Mysql => {
+                rebuilt.extend(mysql::ensure_template(name, spec, ctx, true)?.map(Utf8PathBuf::into_string));
+            }
+            // SQLite's template is its seed file, and a Redis has none.
+            DbAdapter::Sqlite | DbAdapter::Redis => {}
         }
     }
     Ok(rebuilt)
@@ -297,10 +315,7 @@ pub fn reset(
     // Everything that can be known to fail is asked first. Dropping the fork and *then* finding
     // docker is off leaves a worktree with no database where it had a working one.
     for (name, spec) in selection(databases, Some(&only))? {
-        supported(name, spec)?;
-        if spec.adapter == DbAdapter::Postgres {
-            postgres::preflight(name, ctx)?;
-        }
+        preflight(name, spec, ctx)?;
     }
     drop_forks(databases, Some(&only), ctx)?;
     let mut forked = fork(databases, Some(&only), ctx, source)?;
@@ -323,10 +338,10 @@ pub fn drop_forks(
         recorded.into_iter().partition(|instance| only.is_none_or(|names| names.contains(&instance.name)));
     for instance in &going {
         match instance.adapter {
+            DbAdapter::Sqlite => sqlite_remove(&fork_file(ctx.state, &instance.name))?,
             DbAdapter::Postgres => postgres::remove(instance, ctx)?,
-            DbAdapter::Sqlite | DbAdapter::Mysql | DbAdapter::Redis => {
-                sqlite_remove(&fork_file(ctx.state, &instance.name))?;
-            }
+            DbAdapter::Mysql => mysql::remove(instance, ctx),
+            DbAdapter::Redis => redis::remove(instance, ctx)?,
         }
     }
     write_registry(ctx.state, &staying)?;
@@ -349,14 +364,19 @@ pub fn ready(ctx: &DbContext<'_>) -> Result<Vec<DbInstance>, DbError> {
 
 /// A record, corrected for what is actually there. `probe` allows the expensive question.
 fn observe(instance: &DbInstance, ctx: &DbContext<'_>, probe: bool) -> DbInstance {
-    if instance.adapter == DbAdapter::Postgres {
+    if instance.adapter != DbAdapter::Sqlite {
         if !probe {
             return DbInstance { status: ForkStatus::Ready, ..instance.clone() };
         }
-        let size = postgres::size(instance, ctx);
+        // `Some(size)` when the fork answers; a Redis answers without having a size worth the name.
+        let seen = match instance.adapter {
+            DbAdapter::Postgres => postgres::size(instance, ctx).map(Some),
+            DbAdapter::Mysql => mysql::answers(instance, ctx).map(Some),
+            DbAdapter::Redis | DbAdapter::Sqlite => redis::answers(instance, ctx).then_some(None),
+        };
         return DbInstance {
-            status: if size.is_some() { ForkStatus::Ready } else { ForkStatus::Missing },
-            size_bytes: size,
+            status: if seen.is_some() { ForkStatus::Ready } else { ForkStatus::Missing },
+            size_bytes: seen.flatten(),
             ..instance.clone()
         };
     }
@@ -464,6 +484,7 @@ mod tests {
         project: Utf8PathBuf,
         state: Utf8PathBuf,
         other_state: Utf8PathBuf,
+        ports: Utf8PathBuf,
     }
 
     impl Harness {
@@ -472,15 +493,36 @@ mod tests {
             let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("utf-8 temp dir");
             let project = root.join("project");
             fs::create_dir_all(project.join("data")).expect("project");
-            Harness { _dir: dir, project, state: root.join("state/feat-x"), other_state: root.join("state/main") }
+            let ports = root.join("state/ports.json");
+            Harness {
+                _dir: dir,
+                project,
+                state: root.join("state/feat-x"),
+                other_state: root.join("state/main"),
+                ports,
+            }
         }
 
         fn ctx(&self) -> DbContext<'_> {
-            DbContext { project_path: &self.project, project: "demo", state: &self.state, env: &NO_ENV }
+            DbContext {
+                project_path: &self.project,
+                project: "demo",
+                state: &self.state,
+                env: &NO_ENV,
+                branch: "feat/x",
+                ports: &self.ports,
+            }
         }
 
         fn other(&self) -> DbContext<'_> {
-            DbContext { project_path: &self.project, project: "demo", state: &self.other_state, env: &NO_ENV }
+            DbContext {
+                project_path: &self.project,
+                project: "demo",
+                state: &self.other_state,
+                env: &NO_ENV,
+                branch: "main",
+                ports: &self.ports,
+            }
         }
 
         fn seed(&self, relative: &str, bytes: &[u8]) {
@@ -662,24 +704,6 @@ mod tests {
         assert_eq!(error.code(), ErrorCode::ConfigInvalid);
         let error = drop_forks(&both, Some(&only(&["nope"])), &harness.ctx()).expect_err("unknown");
         assert_eq!(error.code(), ErrorCode::ConfigInvalid);
-    }
-
-    #[rstest]
-    #[case("mysql")]
-    #[case("redis")]
-    fn an_adapter_this_version_cannot_drive_forks_nothing_at_all(#[case] adapter: &str) {
-        let harness = Harness::new();
-        // `alpha` sorts first and is supported. It still must not be forked.
-        let mixed = databases(&format!("alpha:\n  adapter: sqlite\nmain:\n  adapter: {adapter}\n"));
-
-        let error = fork(&mixed, None, &harness.ctx(), &ForkSource::Empty).expect_err("unsupported");
-
-        assert_eq!(
-            error.to_string(),
-            format!("database main: adapter {adapter} is not supported by this version of canopyd")
-        );
-        assert_eq!(error.code(), ErrorCode::DbUnsupported);
-        assert!(!harness.state.join("db/alpha.db").exists(), "half a set of forks is worse than none");
     }
 
     #[test]

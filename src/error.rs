@@ -26,7 +26,6 @@ pub enum ErrorCode {
     ServiceFailed,
     RepositoryUnhealthy,
     Locked,
-    DbUnsupported,
     DbFailed,
     Io,
 }
@@ -50,7 +49,6 @@ impl ErrorCode {
             ErrorCode::ServiceFailed => "service_failed",
             ErrorCode::RepositoryUnhealthy => "repository_unhealthy",
             ErrorCode::Locked => "locked",
-            ErrorCode::DbUnsupported => "db_unsupported",
             ErrorCode::DbFailed => "db_failed",
             ErrorCode::Io => "io",
         }
@@ -82,7 +80,6 @@ impl ErrorCode {
         ErrorCode::ServiceFailed,
         ErrorCode::RepositoryUnhealthy,
         ErrorCode::Locked,
-        ErrorCode::DbUnsupported,
         ErrorCode::DbFailed,
         ErrorCode::Io,
     ];

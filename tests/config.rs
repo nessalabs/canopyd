@@ -338,14 +338,6 @@ fn a_database_may_have_exactly_one_seed_source() {
 }
 
 #[test]
-fn a_database_adapter_that_cannot_be_driven_yet_warns_by_name() {
-    warning_mentioning(
-        "version: 1\ndatabases:\n  main:\n    adapter: redis\nservices:\n  a:\n    run: x\n",
-        "adapter redis is not supported by this version",
-    );
-}
-
-#[test]
 fn a_localhost_health_url_warns_about_the_ipv6_trap() {
     // Canopy's own canopy.yaml carries a comment about being burned by this: vite binds
     // 127.0.0.1 while `localhost` resolves to ::1 first on macOS.
