@@ -196,15 +196,31 @@ fn every_code_in_the_table_is_produced_by_some_variant() {
     let unproduced: std::collections::BTreeSet<&str> =
         ErrorCode::ALL.iter().map(|code| code.as_str()).filter(|code| !produced.contains(code)).collect();
 
-    // `service_failed` arrives with the supervisor. `port_in_use` and `setup_failed` are
-    // produced by a module bridge or a verdict envelope rather than a crate-level variant,
-    // and are covered elsewhere.
+    // `service_failed` arrives with the supervisor. `port_in_use`, `setup_failed` and the two
+    // `db_*` codes are produced by a module bridge or a verdict envelope rather than a
+    // crate-level variant, and are covered elsewhere — the `db_*` pair just below.
     //
     // Compared as a set: the iteration order is `ErrorCode::ALL`'s, and a variant inserted in
     // the middle of that list should not fail a test about *which* codes exist.
-    let expected =
-        std::collections::BTreeSet::from(["port_in_use", "repository_unhealthy", "service_failed", "setup_failed"]);
+    let expected = std::collections::BTreeSet::from([
+        "db_failed",
+        "db_unsupported",
+        "port_in_use",
+        "repository_unhealthy",
+        "service_failed",
+        "setup_failed",
+    ]);
     assert_eq!(unproduced, expected, "unexpected unproduced codes");
+}
+
+#[test]
+fn a_database_error_keeps_the_code_its_module_chose() {
+    use canopyd::db::DbError;
+    let unsupported: Error = DbError::Unsupported { name: "main".to_owned(), adapter: "postgres" }.into();
+    assert_eq!(unsupported.code(), ErrorCode::DbUnsupported);
+    assert_eq!(unsupported.to_string(), "database main: adapter postgres is not supported by this version of canopyd");
+    let failed: Error = DbError::NoSourceFork { name: "main".to_owned(), branch: "feat/x".to_owned() }.into();
+    assert_eq!(failed.code(), ErrorCode::DbFailed);
 }
 
 #[test]

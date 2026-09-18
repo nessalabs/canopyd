@@ -57,7 +57,7 @@ that, and it may not match.
 | `env_file` | string or `false` | `.env.canopy` |
 | `worktree` | [worktree](#worktree) | see below |
 | `copy` | list of [rule](#copy) | `[]` |
-| `databases` | name → database | `{}` — **parsed but not yet supported**; warns |
+| `databases` | name → database | `{}` — see [Databases](#databases). `sqlite` is supported; the others warn |
 
 **Names** — for ports, services and databases — may contain lowercase letters, digits, `_` and
 `-`, and must start with a letter or digit. The rule is strict because a name has to be safe in
@@ -80,7 +80,7 @@ steps:
 | `worktree` | `${worktree.path}`, `${worktree.name}` | this checkout |
 | `project` | `${project.name}` | the repository |
 | `env` | `${env.BASE}` | another variable **declared in this file** |
-| `db` | `${db.main.url}` | a database fork — recognised, not yet resolved |
+| `db` | `${db.main}`, `${db.main.url}`, `${db.main.file}` | this worktree's fork of a database. No fork, no value: the reference stays as written |
 
 Scopes and resource names are lowercase `[a-z0-9_-]`, the same rule ports and services follow —
 so `${ports.WEB}` names something that cannot exist and stays literal. The `env` scope is the
@@ -337,7 +337,34 @@ would be worse than a clear message.
 - a `localhost` health URL (the `::1` trap above)
 - a declared port no service references
 - no services at all
-- `databases:` — recognised, not yet supported
+- a database whose adapter this version cannot drive (`postgres`, `mysql`, `redis`)
+
+## Databases
+
+A worktree that shares a database with `main` is not isolated: a migration run on the branch is
+a migration run on `main`. A **fork** is a private copy, made with `canopyd db fork`, kept with
+the worktree's other state, and removed with it.
+
+```yaml
+databases:
+  main:
+    adapter: sqlite
+    source: data/dev.db     # the seed, relative to the primary checkout
+    env: DATABASE_URL       # defaults to <NAME>_URL
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `adapter` | required | `sqlite` today. `postgres`, `mysql` and `redis` parse, warn, and are refused by `db fork` |
+| `source` | none | sqlite: the file each fork is copied from. Missing means forks start empty |
+| `env` | `<NAME>_URL` | the variable that receives the fork's URL |
+| `version`, `seed`, `runtime`, `options` | | for the server adapters; unused by `sqlite` |
+
+Once a fork exists its URL is in the worktree's environment three ways: under `env`, as
+`CANOPY_DB_<NAME>_URL`, and as `${db.<name>.url}` for anything in this file. It is layered
+**after** `env:`, so a `DATABASE_URL` the file sets for people running without canopyd is
+replaced by the fork's, and **before** a caller's `--env`, which wins. A fork that has gone
+missing from disk is left out entirely, so nothing is pointed at a database that is not there.
 
 ## A complete example
 

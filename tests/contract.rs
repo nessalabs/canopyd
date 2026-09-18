@@ -26,6 +26,10 @@ const ENVELOPE_COMMANDS: &[(&[&str], &str)] = &[
     (&["logs", "web", "feat/x"], "logs"),
     (&["setup", "feat/x"], "setup"),
     (&["copy", "feat/x"], "copy"),
+    (&["db", "fork", "feat/x"], "db fork"),
+    (&["db", "ls", "feat/x"], "db ls"),
+    (&["db", "reset", "main", "feat/x"], "db reset"),
+    (&["db", "drop", "feat/x"], "db drop"),
     (&["new", "feat/new-one"], "new"),
     (&["rm", "feat/x"], "rm"),
     (&["doctor"], "doctor"),
@@ -148,7 +152,7 @@ fn error_code_count_is_pinned() {
     // `ErrorCode::as_str` is an exhaustive match, so a new variant cannot compile without a
     // wire string. This guards the other half: that the variant was also added to `ALL`,
     // which the CLI documentation and these tests iterate. Bump the number deliberately.
-    assert_eq!(ErrorCode::ALL.len(), 16, "a variant was added or removed — update ALL and this count");
+    assert_eq!(ErrorCode::ALL.len(), 18, "a variant was added or removed — update ALL and this count");
 }
 
 #[test]

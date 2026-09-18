@@ -401,6 +401,28 @@ that asserts exactly that.
 Events go to stderr as they happen (one JSON object per line under `--json`), so stdout stays
 the final envelope.
 
+## `canopyd db`
+
+Database forks: a private copy of each database `canopy.yaml` declares, per worktree. See
+[Databases](configuration.md#databases) for what a fork is and how its URL reaches a service.
+
+```console
+$ canopyd db fork feat/login
+main             sqlite   ready    file:/…/state/feat-login/db/main.db
+```
+
+- `db fork [<branch>]` forks what does not have a fork yet. One that exists is **left alone** —
+  the data in it is somebody's work. `--only <name>` restricts it; `--from` says what a new fork
+  starts as: `template` (the seed, the default), `empty`, or a **branch name** to copy that
+  worktree's fork
+- `db ls [<branch>]` lists forks, re-checked against the disk: one whose file is gone is `missing`
+- `db reset <name> [<branch>]` throws a fork away and makes it again; takes `--from` too
+- `db drop [<branch>]` removes forks, all or `--only`. `rm` does this for the whole worktree
+
+An adapter this version cannot drive is an error (`db_unsupported`) for the **whole** call, and
+nothing is forked: half a set of forks leaves a worktree pointed at a shared database without
+saying so.
+
 ## `canopyd doctor`
 
 What is wrong with this repository's canopyd state. Read-only — it reports, it never fixes.

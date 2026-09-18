@@ -1036,6 +1036,7 @@ mod tests {
                     project: "proj",
                     project_path: &worktree,
                     ports: &ports,
+                    databases: &[],
                 };
                 env::resolve(&CanopyConfig::empty(), &facts, &BTreeMap::new())
             };
@@ -1050,6 +1051,7 @@ mod tests {
                 project: "proj",
                 project_path: &self.worktree,
                 ports: &self.ports,
+                databases: &[],
             }
         }
 
