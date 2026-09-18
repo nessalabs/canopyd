@@ -77,7 +77,7 @@ fn the_starter_shown_by_config_init_is_the_one_documented() {
 fn every_documented_error_code_exists() {
     // The JSON reference tabulates error codes; a code that is documented but not real sends
     // a consumer hunting for a branch that can never be taken.
-    let doc = include_str!("../docs/json-api.md");
+    let doc = section(include_str!("../docs/json-api.md"), "## Errors");
     let known: Vec<&str> = canopyd::ErrorCode::ALL.iter().map(|code| code.as_str()).collect();
 
     let mut documented = Vec::new();
@@ -95,5 +95,55 @@ fn every_documented_error_code_exists() {
     }
     for code in &known {
         assert!(documented.iter().any(|d| d == code), "error code `{code}` is not documented in docs/json-api.md");
+    }
+}
+
+/// The text under `heading`, up to the next heading at the same level or above.
+///
+/// The JSON reference holds more than one table of backticked names. Each check reads the one
+/// it is about, so a row in the events table is never mistaken for an error code.
+fn section<'a>(markdown: &'a str, heading: &str) -> &'a str {
+    let level = heading.chars().take_while(|c| *c == '#').count();
+    let start = markdown.find(heading).unwrap_or_else(|| panic!("no {heading:?} section"));
+    let body = &markdown[start + heading.len()..];
+    let end = body
+        .match_indices("\n#")
+        .find(|(at, _)| body[at + 1..].chars().take_while(|c| *c == '#').count() <= level)
+        .map_or(body.len(), |(at, _)| at);
+    &body[..end]
+}
+
+#[test]
+fn every_run_event_is_documented_and_every_documented_event_is_real() {
+    // An embedder switches on `event`. A tag missing from the table is one it never handles, and
+    // a tag in the table that nothing emits is a branch it writes for nothing.
+    use canopyd::{Event, Exit};
+    let name = || "web".to_owned();
+    let events = [
+        Event::Started { name: name(), pid: 1 },
+        Event::Healthy { name: name() },
+        Event::Unhealthy { name: name(), detail: String::new() },
+        Event::Exited { name: name(), status: Exit::Unknown },
+        Event::Restarting { name: name(), attempt: 1, delay_ms: 1 },
+        Event::GaveUp { name: name(), restarts: 1 },
+        Event::Stopped { name: name() },
+        Event::Rejected { request: String::new(), detail: String::new() },
+    ];
+    let real: Vec<String> =
+        events.iter().map(|event| serde_json::to_value(event).unwrap()["event"].as_str().unwrap().to_owned()).collect();
+
+    let doc = section(include_str!("../docs/json-api.md"), "### `run`: events while it runs");
+    let documented: Vec<&str> = doc
+        .lines()
+        .filter(|line| line.starts_with("| `"))
+        .filter_map(|line| line.trim_start_matches("| `").split('`').next())
+        .filter(|tag| *tag != "event")
+        .collect();
+
+    for tag in &real {
+        assert!(documented.contains(&tag.as_str()), "event `{tag}` is not documented in docs/json-api.md");
+    }
+    for tag in &documented {
+        assert!(real.iter().any(|r| r == tag), "docs/json-api.md documents event `{tag}`, which nothing emits");
     }
 }

@@ -84,6 +84,14 @@ enum Command {
         /// Write the file named by `env_file:` into the worktree.
         #[arg(long)]
         write: bool,
+        /// With `--json`, print secrets as they are instead of masked. For an embedder that
+        /// stores the table and does its own masking; a terminal has `--export` for that.
+        #[arg(long, conflicts_with_all = ["export", "write"])]
+        reveal: bool,
+        /// Add or override an environment variable, as `KEY=VALUE`. Repeatable. Layered last,
+        /// for an embedder that knows things this crate cannot resolve — see `setup --env`.
+        #[arg(long = "env")]
+        env_overrides: Vec<String>,
     },
     /// Start a worktree's services.
     Up {
@@ -95,15 +103,29 @@ enum Command {
         /// Return as soon as each service is spawned, without waiting for its health check.
         #[arg(long)]
         no_wait: bool,
+        /// Add or override an environment variable, as `KEY=VALUE`. Repeatable. Layered last,
+        /// for an embedder that knows things this crate cannot resolve — see `setup --env`.
+        #[arg(long = "env")]
+        env_overrides: Vec<String>,
     },
     /// Stop a worktree's services.
     Down {
         branch: Option<String>,
         #[arg(long)]
         only: Vec<String>,
+        /// Add or override an environment variable, as `KEY=VALUE`. Repeatable. Layered last,
+        /// for an embedder that knows things this crate cannot resolve — see `setup --env`.
+        #[arg(long = "env")]
+        env_overrides: Vec<String>,
     },
     /// Show what is running for a worktree.
-    Ps { branch: Option<String> },
+    Ps {
+        branch: Option<String>,
+        /// Add or override an environment variable, as `KEY=VALUE`. Repeatable. Layered last,
+        /// for an embedder that knows things this crate cannot resolve — see `setup --env`.
+        #[arg(long = "env")]
+        env_overrides: Vec<String>,
+    },
     /// Show a service's log.
     Logs {
         service: String,
@@ -114,6 +136,14 @@ enum Command {
         /// How many existing lines to show first.
         #[arg(long, short = 'n', default_value_t = 200)]
         lines: usize,
+        /// Start from this byte offset instead of from the newest lines: the `next_offset` an
+        /// earlier read returned. Implies `--offsets`.
+        #[arg(long)]
+        since: Option<u64>,
+        /// With `--json`, report each line's offset and where to continue from, so a reader can
+        /// come back for exactly what it has not seen.
+        #[arg(long)]
+        offsets: bool,
     },
     /// Carry gitignored files into a worktree, per the `copy:` rules.
     Copy {
@@ -173,6 +203,15 @@ enum Command {
         restarts: Option<u32>,
         #[arg(long)]
         restart_window: Option<String>,
+        /// Take `start <service>`, `stop <service>` and `restart <service>` on stdin, one per
+        /// line. End of input stops everything, so an embedder that dies takes its services
+        /// with it instead of orphaning them.
+        #[arg(long)]
+        control: bool,
+        /// Add or override an environment variable, as `KEY=VALUE`. Repeatable. Layered last,
+        /// for an embedder that knows things this crate cannot resolve — see `setup --env`.
+        #[arg(long = "env")]
+        env_overrides: Vec<String>,
     },
     /// Report anything wrong with this repository's canopyd state.
     Doctor,
@@ -422,10 +461,10 @@ fn run(cli: &Cli) -> Result<u8> {
             }
         }
 
-        Command::Env { ref branch, export, write } => {
+        Command::Env { ref branch, export, write, reveal, ref env_overrides } => {
             let branch = resolve_branch(&canopy, branch.as_deref())?;
             let worktree = worktree_path_for_branch(&canopy, &branch)?;
-            let table = canopy.env_for(&branch, &worktree)?;
+            let table = canopy.env_for_with(&branch, &worktree, &overrides(env_overrides)?)?;
             if write {
                 let default_config = canopyd::config::CanopyConfig::empty();
                 let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
@@ -437,6 +476,8 @@ fn run(cli: &Cli) -> Result<u8> {
                     None if cli.json => emit("env", &serde_json::json!({ "written": null })),
                     None => println!("env_file is disabled; nothing written"),
                 }
+            } else if cli.json && reveal {
+                emit("env", &table.vars());
             } else if cli.json {
                 // Secrets are masked for display; the file and `--export` keep the real values.
                 emit("env", &table.masked());
@@ -447,8 +488,9 @@ fn run(cli: &Cli) -> Result<u8> {
             }
         }
 
-        Command::Up { ref branch, ref only, no_wait } => {
-            let (branch, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref())?;
+        Command::Up { ref branch, ref only, no_wait, ref env_overrides } => {
+            let (branch, worktree, state, env, facts_owner) =
+                service_context(&canopy, branch.as_deref(), env_overrides)?;
             let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let facts = facts_owner.facts();
@@ -459,8 +501,8 @@ fn run(cli: &Cli) -> Result<u8> {
             let _ = branch;
         }
 
-        Command::Down { ref branch, ref only } => {
-            let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref())?;
+        Command::Down { ref branch, ref only, ref env_overrides } => {
+            let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref(), env_overrides)?;
             let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let facts = facts_owner.facts();
@@ -470,8 +512,8 @@ fn run(cli: &Cli) -> Result<u8> {
             report_services(cli, "down", &statuses);
         }
 
-        Command::Ps { ref branch } => {
-            let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref())?;
+        Command::Ps { ref branch, ref env_overrides } => {
+            let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref(), env_overrides)?;
             let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let facts = facts_owner.facts();
@@ -480,10 +522,27 @@ fn run(cli: &Cli) -> Result<u8> {
             report_services(cli, "ps", &statuses);
         }
 
-        Command::Logs { ref service, ref branch, follow, lines } => {
+        Command::Logs { ref service, ref branch, follow, lines, since, offsets } => {
             let branch = resolve_branch(&canopy, branch.as_deref())?;
             let state = canopy.state_dir(&branch);
-            if follow {
+            if follow && cli.json {
+                // A stream, so there is no envelope to end it with: one event per line, until
+                // the caller goes away. `--json` and `-f` together used to mean plain lines,
+                // which is not something a program asking for JSON can use.
+                let interrupted = interrupt_flag()?;
+                let mut out = |event: canopyd::service::LogEvent| {
+                    println!("{}", serde_json::to_string(&event).expect("event is serializable"));
+                };
+                canopyd::service::follow_from(
+                    &state,
+                    service,
+                    since,
+                    lines,
+                    canopyd::service::FOLLOW_POLL,
+                    &mut out,
+                    &|| !interrupted.load(std::sync::atomic::Ordering::Relaxed),
+                )?;
+            } else if follow {
                 // Ctrl-C has to land even on a service that has gone quiet, so the stop
                 // condition is checked on every poll, not only between lines.
                 let interrupted = interrupt_flag()?;
@@ -491,6 +550,15 @@ fn run(cli: &Cli) -> Result<u8> {
                 canopyd::service::follow(&state, service, lines, canopyd::service::FOLLOW_POLL, &mut out, &|| {
                     !interrupted.load(std::sync::atomic::Ordering::Relaxed)
                 })?;
+            } else if since.is_some() || offsets {
+                let page = canopyd::service::page(&state, service, since, lines)?;
+                if cli.json {
+                    emit("logs", &page);
+                } else {
+                    for line in &page.lines {
+                        println!("{}", line.text);
+                    }
+                }
             } else {
                 let tail = canopyd::service::logs(&state, service, lines)?;
                 if cli.json {
@@ -621,8 +689,10 @@ fn run(cli: &Cli) -> Result<u8> {
             ref backoff_max,
             restarts,
             ref restart_window,
+            control,
+            ref env_overrides,
         } => {
-            let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref())?;
+            let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref(), env_overrides)?;
             let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let facts = facts_owner.facts();
@@ -666,14 +736,38 @@ fn run(cli: &Cli) -> Result<u8> {
                 }
             };
 
+            // Requests arrive on a thread of their own because a blocking read of stdin and a poll
+            // loop cannot share one. The loop drains whatever has arrived, once per poll.
+            let (requests, inbox) = std::sync::mpsc::channel::<String>();
+            if control {
+                let stopping = stopping.clone();
+                std::thread::spawn(move || {
+                    for line in std::io::stdin().lines().map_while(std::io::Result::ok) {
+                        let _ = requests.send(line);
+                    }
+                    stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+            let mut controls = || {
+                inbox
+                    .try_iter()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| {
+                        line.parse::<canopyd::Control>()
+                            .map_err(|detail| canopyd::Rejection { request: line.trim().to_owned(), detail })
+                    })
+                    .collect::<Vec<_>>()
+            };
+
             let clock = canopyd::health::SystemClock::new();
-            let outcome = canopyd::supervise::run(
+            let outcome = canopyd::supervise::run_with(
                 &config.services,
                 selection(only).as_ref(),
                 &ctx,
                 &opts,
                 &clock,
                 &|| stopping.load(std::sync::atomic::Ordering::Relaxed),
+                &mut controls,
                 &mut on_event,
             )?;
 
@@ -900,21 +994,28 @@ fn searched_description(canopy: &Canopy) -> String {
 
 /// `KEY=VALUE`, the spelling `--env` takes. An empty value is legal; an absent `=` is not.
 fn parse_env(raw: &[String]) -> Result<Vec<(String, String)>> {
+    let invalid = |message: String| Error::Module { code: canopyd::ErrorCode::ConfigInvalid, message };
     raw.iter()
-        .map(|text| {
-            let (key, value) = text.split_once('=').ok_or_else(|| Error::Module {
-                code: canopyd::ErrorCode::ConfigInvalid,
-                message: format!("--env needs KEY=VALUE, got {text:?}"),
-            })?;
-            if key.is_empty() {
-                return Err(Error::Module {
-                    code: canopyd::ErrorCode::ConfigInvalid,
-                    message: "--env needs a name before the =".to_owned(),
-                });
-            }
-            Ok((key.to_owned(), value.to_owned()))
+        .map(|text| match text.split_once('=') {
+            Some(("", _)) => Err(invalid("--env needs a name before the =".to_owned())),
+            Some((key, value)) => Ok((key.to_owned(), value.to_owned())),
+            // A bare name means "the value I was started with", the way `docker run -e KEY` does.
+            // It is how a secret is handed over: an argument is readable by every user on the
+            // machine through `ps`, and an environment is not.
+            None => match std::env::var(text) {
+                Ok(value) => Ok((text.clone(), value)),
+                Err(_) => {
+                    Err(invalid(format!("--env {text}: not KEY=VALUE, and {text} is not set in the environment")))
+                }
+            },
         })
         .collect()
+}
+
+/// `--env` flags as the override layer [`Canopy::env_for_with`] takes. A key given twice keeps
+/// its last value, which is what repeating a flag means everywhere else.
+fn overrides(raw: &[String]) -> Result<std::collections::BTreeMap<String, String>> {
+    Ok(parse_env(raw)?.into_iter().collect())
 }
 
 /// `pattern` or `pattern=strategy`, the spelling `--rule` takes.
@@ -974,7 +1075,7 @@ type ServiceSetup = (String, Utf8PathBuf, Utf8PathBuf, canopyd::EnvTable, FactsO
 
 /// Resolves the branch, its checkout, its state directory and its environment in one place,
 /// since every service command needs all four.
-fn service_context(canopy: &Canopy, given: Option<&str>) -> Result<ServiceSetup> {
+fn service_context(canopy: &Canopy, given: Option<&str>, env_overrides: &[String]) -> Result<ServiceSetup> {
     let branch = resolve_branch(canopy, given)?;
     let worktree = worktree_path_for_branch(canopy, &branch)?;
     if !worktree.exists() {
@@ -982,7 +1083,7 @@ fn service_context(canopy: &Canopy, given: Option<&str>) -> Result<ServiceSetup>
     }
     let state = canopy.state_dir(&branch);
     std::fs::create_dir_all(&state)?;
-    let env = canopy.env_for(&branch, &worktree)?;
+    let env = canopy.env_for_with(&branch, &worktree, &overrides(env_overrides)?)?;
     let owner = FactsOwner {
         name: worktree.file_name().unwrap_or(&branch).to_owned(),
         worktree: worktree.clone(),
@@ -1099,7 +1200,7 @@ fn run_hook(cli: &Cli, canopy: &Canopy, command: &HookCommand) -> Result<u8> {
 /// Stops whatever is still running for a worktree that is about to be removed. Best effort:
 /// a worktree whose config has gone, or which never started anything, must still be removable.
 fn stop_services_for(canopy: &Canopy, target: &str) -> Result<Vec<String>> {
-    let Ok((_, worktree, state, env, owner)) = service_context(canopy, Some(target)) else {
+    let Ok((_, worktree, state, env, owner)) = service_context(canopy, Some(target), &[]) else {
         return Ok(Vec::new());
     };
     let default_config = canopyd::config::CanopyConfig::empty();

@@ -214,6 +214,15 @@ shows up as a spurious diff.
 - `--write` writes the file named by `env_file:` into the worktree
 - `--json` **masks** values that look like secrets; the file and `--export` keep the real ones,
   because masking is presentation, not storage
+- `--json --reveal` prints the real values, for an embedder that stores the table and masks it
+  itself
+- `--env KEY=VALUE` (repeatable) adds the caller's own variables as the last layer, tagged
+  `override`. `up`, `down`, `ps`, `run` and `setup` take the same flag, so a value this tool
+  cannot resolve — a database URL from a fork somebody else made — reaches every service, its
+  health checks and the written file alike
+- `--env KEY` with no value takes it from the environment `canopyd` was started with, like
+  `docker run -e KEY`. That is how to pass a secret: arguments are visible to every user on
+  the machine through `ps`, an environment is not
 
 Values are single-quoted when they need it. Double quotes would not do: `sh` still expands `$`,
 backticks and `\` inside them, so a password containing `$` would not survive a round trip
@@ -269,6 +278,14 @@ died.
 
 - `-n <count>` how many lines to show (default 200)
 - `-f` keep printing as new lines arrive
+- `--offsets` with `--json`: `data` becomes `{ lines: [{ offset, text }], next_offset,
+  truncated }` instead of a list of strings. `offset` is the byte a line starts at
+- `--since <offset>` reads from an offset an earlier read returned as `next_offset`, so a reader
+  that went away comes back for exactly what it missed. `truncated: true` means the log got
+  shorter in the meantime (`gc` does that) and the read started over from the beginning
+- `-f --json` is a stream rather than an envelope: one `{"event":"line","offset":…,"text":…}`
+  per line until the caller goes away, and `{"event":"reset","next_offset":0}` if the log is
+  truncated underneath it
 
 ## `canopyd copy [<branch>]`
 
@@ -349,9 +366,32 @@ terminal or a CI job wants a process to babysit. Conflating the two is what forc
   Without that, one broken command pins a core forever
 - `--no-restart` reports exits without acting on them
 
+**A dependent waits for its dependency to be serving.** A service whose `depends_on` names one
+with a `health:` block is not started until that check passes — which is what lets a web server
+read the token its API writes at boot. It does not wait forever: once the dependency has had its
+whole health window (`start_period` plus `retries` intervals) and five seconds more, the
+dependent starts anyway, and the failing check stays reported on the dependency. A dependency
+that has exited, given up or been stopped holds nobody up, and a `start` request never waits.
+
 **A failing health check is reported, never acted on.** A subtly wrong check — a `localhost`
 that resolves to `::1` first on macOS — would otherwise become an infinite kill loop against a
 service that is working perfectly.
+
+### `--control`: steering one service
+
+`run --control` reads requests from stdin, one per line: `start <service>`, `stop <service>`,
+`restart <service>`. This is how a program that embeds `run` stops a single service — calling
+`down` from another process would look like a crash, and `restart: always` would undo it.
+
+- a requested **stop holds** the service: the restart policy does not apply until a `start` or
+  `restart` names it again, and it reports `stopped` once, not again at shutdown
+- a requested **start** wipes the service's restart history, so one that gave up gets a fresh
+  budget; starting a service that is already running does nothing
+- a service outside `--only` **joins** when it is named, and is stopped with everything else
+- a request that cannot be honoured is a `rejected` event carrying the request and the reason;
+  the run carries on
+- **end of input stops everything**, exactly like Ctrl-C — so an embedder that dies takes its
+  services with it instead of orphaning them
 
 Ctrl-C flips a flag the loop checks rather than killing the supervisor where it stands, because
 services would otherwise be left running with nothing watching them. Shutdown stops everything

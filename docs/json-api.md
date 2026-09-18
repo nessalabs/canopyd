@@ -155,6 +155,46 @@ Prints a starter `canopy.yaml` on stdout and writes nothing — redirect it your
 command that works outside a repository, since creating the file is sometimes the first thing
 you do in a new directory.
 
+### `run`: events while it runs
+
+`run --json` is the one command that speaks before it finishes. **stdout** is still exactly one
+envelope, printed when the run ends (`data.services`, `data.restarts`). **stderr** carries one
+JSON object per line as things happen, each tagged by `event`:
+
+| `event` | Fields | Meaning |
+|---|---|---|
+| `started` | `name`, `pid` | a process is up; `pid` leads its process group |
+| `healthy` | `name` | its health check passed (reported on change, not every interval) |
+| `unhealthy` | `name`, `detail` | its health check is failing — reported, never acted on |
+| `exited` | `name`, `status` | it ended by itself; `status` is `{"exit":"code","code":1}`, `{"exit":"signal","signal":9}` or `{"exit":"unknown"}` |
+| `restarting` | `name`, `attempt`, `delay_ms` | the policy will start it again after the delay |
+| `gave_up` | `name`, `restarts` | the crash-loop budget is spent; it stays down |
+| `stopped` | `name` | stopped on purpose: a `stop` request, or shutdown |
+| `rejected` | `request`, `detail` | a `--control` request that could not be honoured |
+
+```console
+$ canopyd run feat/login --json --control 2>events.ndjson <requests
+```
+
+With `--control`, requests are lines on stdin — `start web`, `stop web`, `restart web` — and
+end of input ends the run. See the [command reference](cli.md) for what each one means.
+
+### `logs`: pages and streams
+
+`logs <service> --json` is a list of strings. With `--offsets` or `--since <offset>` it is a page a
+reader can resume from:
+
+```json
+{ "lines": [{ "offset": 0, "text": "listening on 5173" }], "next_offset": 18, "truncated": false }
+```
+
+`offset` is the byte a line starts at, and `next_offset` is what to pass as `--since` next time.
+`truncated` means there is history the page does not show: a tail that did not reach the start,
+or a `since` past the end of a log that has since been truncated, in which case the page started
+over from the beginning. `logs -f --json` is a stream of one object per line — `line` events
+shaped like the entries above, and `{"event":"reset","next_offset":0}` when the log is truncated
+underneath the reader.
+
 ## Using it from a script
 
 ```bash

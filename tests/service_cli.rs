@@ -78,6 +78,25 @@ fn up_starts_a_service_and_ps_reports_it_running() {
 }
 
 #[test]
+fn up_hands_env_overrides_to_the_service() {
+    // What an embedder needs `--env` for: a value this crate could never resolve by itself.
+    let tag = marker("env-override");
+    let sleep = sleeper(&tag);
+    let (fx, wt) = prepared(&format!("  web:\n    run: echo \"$DATABASE_URL\" > seen.txt; {sleep}\n"));
+
+    run(&fx, &["up", "feat/x", "--no-wait", "--env", "DATABASE_URL=postgres://db/fork"]);
+
+    let seen = wt.join("seen.txt");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !seen.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(std::fs::read_to_string(&seen).unwrap_or_default().trim(), "postgres://db/fork");
+
+    stop_all(&fx);
+}
+
+#[test]
 fn up_is_idempotent() {
     let tag = marker("idempotent");
     let sleep = sleeper(&tag);
@@ -227,6 +246,75 @@ fn logs_capture_what_a_service_printed() {
 }
 
 #[test]
+fn logs_can_be_read_in_pages_that_resume_where_the_last_one_ended() {
+    let (fx, wt) = prepared(
+        "  web:\n    run: echo one; echo two; until [ -f more ]; do sleep 0.05; done; echo three; sleep 120\n",
+    );
+    run(&fx, &["up", "feat/x", "--no-wait"]);
+
+    let page_with = |args: &[&str], want: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let page = run(&fx, args);
+            if page["lines"].as_array().is_some_and(|lines| lines.len() >= want) || std::time::Instant::now() > deadline
+            {
+                return page;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+
+    let first = page_with(&["logs", "web", "feat/x", "--offsets"], 2);
+    let texts: Vec<&str> = first["lines"].as_array().unwrap().iter().map(|l| l["text"].as_str().unwrap()).collect();
+    assert_eq!(texts, ["one", "two"]);
+    assert_eq!(first["lines"][1]["offset"], 4);
+    assert_eq!(first["truncated"], false);
+    let next = first["next_offset"].as_u64().unwrap().to_string();
+
+    // Coming back with the offset yields exactly what was not there before.
+    std::fs::write(wt.join("more"), "").unwrap();
+    let second = page_with(&["logs", "web", "feat/x", "--since", &next], 1);
+    let texts: Vec<&str> = second["lines"].as_array().unwrap().iter().map(|l| l["text"].as_str().unwrap()).collect();
+    assert_eq!(texts, ["three"]);
+
+    // Without `--json` the same read is just the text.
+    let plain = fx.cwt().args(["logs", "web", "feat/x", "--since", "0", "-n", "2"]).output().unwrap();
+    assert_eq!(String::from_utf8(plain.stdout).unwrap(), "one\ntwo\n");
+
+    stop_all(&fx);
+}
+
+#[test]
+fn logs_follow_in_json_is_a_stream_of_events() {
+    use std::io::{BufRead, BufReader};
+
+    let (fx, _wt) = prepared("  web:\n    run: echo one; echo two; sleep 120\n");
+    run(&fx, &["up", "feat/x", "--no-wait"]);
+
+    let mut child = fx
+        .cwt()
+        .args(["logs", "web", "feat/x", "-f", "--json", "--since", "0"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn logs -f");
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("an event");
+        events.push(serde_json::from_str::<serde_json::Value>(&line).expect("one JSON object per line"));
+    }
+    unsafe_free_sigint(child.id());
+    let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(10)).expect("logs -f exited");
+    assert!(status.success(), "Ctrl-C ends a follow cleanly");
+
+    assert_eq!(events[0], serde_json::json!({ "event": "line", "offset": 0, "text": "one" }));
+    assert_eq!(events[1], serde_json::json!({ "event": "line", "offset": 4, "text": "two" }));
+
+    stop_all(&fx);
+}
+
+#[test]
 fn down_on_a_worktree_with_nothing_running_is_not_an_error() {
     let (fx, _wt) = prepared("  web:\n    run: sleep 120\n");
     let out = fx.cwt().args(["down", "feat/x", "--json"]).output().unwrap();
@@ -311,6 +399,74 @@ fn run_supervises_in_the_foreground_and_shuts_down_cleanly() {
     }
     assert_eq!(processes_matching(&bg), 0, "a backgrounded grandchild outlived the supervisor");
     assert_eq!(processes_matching(&fg), 0, "a child outlived the supervisor");
+}
+
+#[test]
+fn run_takes_requests_on_stdin_and_stops_when_stdin_closes() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    // What an embedder does: hold `run` as a child, steer single services through its stdin, and
+    // rely on a closed pipe — its own death included — to take the services down with it.
+    let tag = marker("control");
+    let (fx, _wt) = prepared(&format!("  web:\n    run: {}\n    restart: always\n", sleeper(&tag)));
+    let mut child = fx
+        .cwt()
+        .args(["run", "feat/x", "--json", "--control"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn run");
+    let mut stdin = child.stdin.take().expect("stdin");
+
+    // Events are read as they arrive, the way an embedder reads them. Each step below waits for
+    // the event that proves the last request was carried out, never for a length of time: the
+    // loop is busy for as long as a start takes, and that is not a number a test can know.
+    let events: Arc<Mutex<Vec<String>>> = Arc::default();
+    let sink = events.clone();
+    let stderr = child.stderr.take().expect("stderr");
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            sink.lock().unwrap().push(line);
+        }
+    });
+    let count = |needle: &str| events.lock().unwrap().iter().filter(|line| line.contains(needle)).count();
+    let saw = |needle: &str, times: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while count(needle) < times && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(count(needle) >= times, "never saw {needle} ×{times}: {:?}", events.lock().unwrap());
+    };
+
+    saw(r#""event":"started""#, 1);
+    assert_eq!(processes_matching(&tag), 1);
+
+    writeln!(stdin, "stop web").unwrap();
+    saw(r#""event":"stopped""#, 1);
+    assert_eq!(processes_matching(&tag), 0, "stop did not stop it");
+    // Held: a request that is answered after the stop proves the loop has been round again, and
+    // `restart: always` still has not brought the service back.
+    writeln!(stdin, "juggle web").unwrap();
+    saw(r#""event":"rejected","request":"juggle web""#, 1);
+    assert_eq!(count(r#""event":"started""#), 1, "a requested stop was treated as a crash");
+    assert_eq!(processes_matching(&tag), 0);
+
+    writeln!(stdin, "start web").unwrap();
+    saw(r#""event":"started""#, 2);
+    assert_eq!(processes_matching(&tag), 1, "start did not start it");
+
+    drop(stdin);
+    let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(20)).expect("run exited");
+    assert!(status.success(), "a closed control pipe is a clean shutdown");
+    reader.join().expect("stderr reader");
+    assert_eq!(count(r#""event":"stopped""#), 2, "{:?}", events.lock().unwrap());
+    assert_eq!(processes_matching(&tag), 0, "the service outlived the supervisor");
+
+    let mut envelope = Vec::new();
+    child.stdout.take().unwrap().read_to_end(&mut envelope).unwrap();
+    assert_eq!(ok_envelope(&envelope)["command"], "run");
 }
 
 /// SIGINT without `unsafe`: `kill` the way a shell does it.

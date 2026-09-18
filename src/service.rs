@@ -183,7 +183,7 @@ pub struct ServiceStatus {
 }
 
 impl ServiceStatus {
-    fn new(name: &str, spec: &ServiceSpec, state: RunState) -> ServiceStatus {
+    pub(crate) fn new(name: &str, spec: &ServiceSpec, state: RunState) -> ServiceStatus {
         ServiceStatus {
             name: name.to_owned(),
             state,
@@ -195,7 +195,7 @@ impl ServiceStatus {
         }
     }
 
-    fn detail(mut self, detail: impl Into<String>) -> ServiceStatus {
+    pub(crate) fn detail(mut self, detail: impl Into<String>) -> ServiceStatus {
         self.detail = Some(detail.into());
         self
     }
@@ -263,9 +263,19 @@ pub fn up(
     Ok(out)
 }
 
+/// The order `up` would act in, validated the way `up` validates: an unknown `only` name and a
+/// `depends_on` cycle are errors here, before anything has been started. For a caller that
+/// starts services one at a time — [`crate::supervise`] does, to wait for dependencies.
+pub(crate) fn order(
+    services: &BTreeMap<String, ServiceSpec>,
+    only: Option<&BTreeSet<String>>,
+) -> Result<Vec<String>, ServiceError> {
+    plan(services, only)
+}
+
 /// `autostart: false` means "declared, but not part of `up`". Naming it explicitly overrides
 /// that — a service you start by hand is the entire point of the flag.
-fn should_skip(spec: &ServiceSpec, named: bool) -> bool {
+pub(crate) fn should_skip(spec: &ServiceSpec, named: bool) -> bool {
     !spec.autostart && !named
 }
 
@@ -566,6 +576,152 @@ pub fn follow(
     Ok(())
 }
 
+/// One line of a log and the byte it starts at.
+///
+/// The offset is what makes a log resumable: a reader that remembers [`LogPage::next_offset`]
+/// can come back for exactly what it has not seen, from another process, an hour later. Bytes
+/// rather than line numbers because finding byte N is a seek and finding line N is reading the
+/// whole file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LogLine {
+    pub offset: u64,
+    pub text: String,
+}
+
+/// A bounded read of a log, and where to continue from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LogPage {
+    pub lines: Vec<LogLine>,
+    /// Hand this back as `since` to read on. It points at the first line not in `lines`.
+    pub next_offset: u64,
+    /// There is history this page does not show: a tail that did not reach the start of the
+    /// file, or a `since` that pointed past the end of a log that has been truncated — in which
+    /// case the page starts over from the beginning and every offset the reader kept is void.
+    pub truncated: bool,
+}
+
+/// What [`follow_from`] reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum LogEvent {
+    Line {
+        offset: u64,
+        text: String,
+    },
+    /// The log got shorter — `gc` truncated it, or somebody did. Offsets start again from here.
+    Reset {
+        next_offset: u64,
+    },
+}
+
+/// Up to `limit` lines: the newest ones when `since` is `None`, otherwise from that offset on.
+pub fn page(state: &Utf8Path, name: &str, since: Option<u64>, limit: usize) -> Result<LogPage, ServiceError> {
+    let log = log_path(state, name);
+    if !log.exists() {
+        return Err(ServiceError::NoLog { name: name.to_owned(), path: log });
+    }
+    let (mut next, mut truncated) = match since {
+        Some(offset) => (offset, false),
+        None => {
+            let start = tail_start(&log, limit)?;
+            (start, start > 0)
+        }
+    };
+    let mut lines: Vec<LogLine> = Vec::new();
+    loop {
+        let (fresh, after, shrank) = read_lines(&log, next)?;
+        truncated |= shrank;
+        let room = limit - lines.len();
+        if fresh.len() > room {
+            // More than fits. The first line left behind is where the next page begins.
+            next = fresh[room].offset;
+            lines.extend(fresh.into_iter().take(room));
+            break;
+        }
+        let exhausted = fresh.is_empty();
+        lines.extend(fresh);
+        next = after;
+        if exhausted {
+            break;
+        }
+    }
+    Ok(LogPage { lines, next_offset: next, truncated })
+}
+
+/// [`follow`] for a reader that keeps its place: every line carries its offset, the starting
+/// point can be one it was given earlier, and a log that is truncated underneath it says so
+/// instead of quietly starting over.
+///
+/// With `since`, everything from that offset is delivered, however much there is — the reader
+/// asked for what it missed. Without it, the newest `backlog` lines come first.
+pub fn follow_from(
+    state: &Utf8Path,
+    name: &str,
+    since: Option<u64>,
+    backlog: usize,
+    poll: Duration,
+    on_event: &mut dyn FnMut(LogEvent),
+    keep_going: &dyn Fn() -> bool,
+) -> Result<(), ServiceError> {
+    let log = log_path(state, name);
+    if !log.exists() {
+        return Err(ServiceError::NoLog { name: name.to_owned(), path: log });
+    }
+    let mut next = match since {
+        Some(offset) => offset,
+        None => tail_start(&log, backlog)?,
+    };
+    while keep_going() {
+        let (fresh, after, shrank) = read_lines(&log, next)?;
+        if shrank {
+            on_event(LogEvent::Reset { next_offset: 0 });
+        }
+        for line in fresh {
+            if !keep_going() {
+                return Ok(());
+            }
+            on_event(LogEvent::Line { offset: line.offset, text: line.text });
+        }
+        // Only a read that found nothing waits. A reader catching up on a long log should not
+        // be paced at one chunk per poll.
+        let idle = after == next;
+        next = after;
+        if idle {
+            std::thread::sleep(poll.as_std());
+        }
+    }
+    Ok(())
+}
+
+/// Where the last `lines` complete lines begin.
+///
+/// Walks backwards a chunk at a time and stops at the newline *before* the first wanted line,
+/// so tailing a log that grew all weekend reads its end and not its whole. An unfinished last
+/// line is not counted, because [`read_lines`] will not deliver it either.
+fn tail_start(log: &Utf8Path, lines: usize) -> Result<u64, ServiceError> {
+    let io = |source: std::io::Error| ServiceError::Io { path: log.to_owned(), source };
+    let mut file = File::open(log).map_err(io)?;
+    let mut end = file.seek(SeekFrom::End(0)).map_err(io)?;
+    // The newline that ends the last complete line is the first one met, hence the one extra.
+    let mut wanted = lines.saturating_add(1);
+    while end > 0 {
+        let start = end.saturating_sub(FOLLOW_CHUNK);
+        file.seek(SeekFrom::Start(start)).map_err(io)?;
+        let mut buffer = vec![0u8; (end - start) as usize];
+        file.read_exact(&mut buffer).map_err(io)?;
+        for (index, byte) in buffer.iter().enumerate().rev() {
+            if *byte == b'\n' {
+                wanted -= 1;
+                if wanted == 0 {
+                    return Ok(start + index as u64 + 1);
+                }
+            }
+        }
+        end = start;
+    }
+    Ok(0)
+}
+
 /// The log's current length, or `0` when there is no log yet.
 fn file_len(path: &Utf8Path) -> u64 {
     fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
@@ -573,12 +729,19 @@ fn file_len(path: &Utf8Path) -> u64 {
 
 /// Complete lines from `offset` on, and the offset to resume from.
 fn read_from(log: &Utf8Path, offset: u64) -> Result<(Vec<String>, u64), ServiceError> {
+    let (lines, next, _) = read_lines(log, offset)?;
+    Ok((lines.into_iter().map(|line| line.text).collect(), next))
+}
+
+/// [`read_from`] with each line's own offset, and whether the log had shrunk under `offset`.
+fn read_lines(log: &Utf8Path, offset: u64) -> Result<(Vec<LogLine>, u64, bool), ServiceError> {
     let io = |source: std::io::Error| ServiceError::Io { path: log.to_owned(), source };
     let mut file = File::open(log).map_err(io)?;
     let length = file.seek(SeekFrom::End(0)).map_err(io)?;
     // A log that got *shorter* was rotated or truncated under us. Resuming from the old offset
     // would seek past its end and read nothing, forever.
-    let start = if length < offset { 0 } else { offset };
+    let shrank = length < offset;
+    let start = if shrank { 0 } else { offset };
     let end = length.min(start.saturating_add(FOLLOW_CHUNK));
     file.seek(SeekFrom::Start(start)).map_err(io)?;
     let mut buffer = vec![0u8; (end - start) as usize];
@@ -592,11 +755,14 @@ fn read_from(log: &Utf8Path, offset: u64) -> Result<(Vec<String>, u64), ServiceE
         if chunk.last() != Some(&b'\n') {
             break;
         }
-        consumed += chunk.len();
         let text = String::from_utf8_lossy(&chunk[..chunk.len() - 1]);
-        out.push(text.trim_end_matches('\r').to_owned());
+        out.push(LogLine {
+            offset: start.saturating_add(consumed as u64),
+            text: text.trim_end_matches('\r').to_owned(),
+        });
+        consumed += chunk.len();
     }
-    Ok((out, start.saturating_add(consumed as u64)))
+    Ok((out, start.saturating_add(consumed as u64), shrank))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1818,6 +1984,207 @@ chatty:
         let seen = seen.into_inner();
 
         assert_eq!(seen, ["z"], "a shorter file means it was rotated, not that we are past its end");
+    }
+
+    fn seeded(harness: &Harness, text: &str) -> Utf8PathBuf {
+        let log = log_path(&harness.state, "web");
+        fs::create_dir_all(log.parent().expect("logs dir")).expect("logs dir");
+        fs::write(&log, text).expect("seed");
+        log
+    }
+
+    fn texts(page: &LogPage) -> Vec<&str> {
+        page.lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_page_without_a_starting_point_is_the_newest_lines() {
+        let harness = Harness::new();
+        seeded(&harness, "one\ntwo\nthree\n");
+
+        let tail = page(&harness.state, "web", None, 2).expect("page");
+        assert_eq!(texts(&tail), ["two", "three"]);
+        assert_eq!(tail.lines[0].offset, 4, "an offset is the byte the line starts at");
+        assert_eq!(tail.next_offset, 14);
+        assert!(tail.truncated, "there is a line this page does not show");
+
+        let all = page(&harness.state, "web", None, 10).expect("page");
+        assert_eq!(texts(&all), ["one", "two", "three"]);
+        assert!(!all.truncated, "the whole log fit");
+    }
+
+    #[test]
+    fn pages_resume_exactly_where_the_last_one_ended() {
+        let harness = Harness::new();
+        let log = seeded(&harness, "a\r\nbb\nccc\ndddd\n");
+
+        // Read the whole log two lines at a time: nothing twice, nothing missed.
+        let mut seen = Vec::new();
+        let mut since = 0;
+        loop {
+            let chunk = page(&harness.state, "web", Some(since), 2).expect("page");
+            assert!(!chunk.truncated);
+            if chunk.lines.is_empty() {
+                break;
+            }
+            seen.extend(chunk.lines.iter().map(|line| (line.offset, line.text.clone())));
+            since = chunk.next_offset;
+        }
+        // The `\r` is dropped from the text and still counted in the offsets.
+        let expected = [(0, "a"), (3, "bb"), (6, "ccc"), (10, "dddd")].map(|(at, text)| (at, text.to_owned()));
+        assert_eq!(seen, expected);
+
+        // A later append is picked up from the offset the reader kept.
+        let mut file = fs::OpenOptions::new().append(true).open(&log).expect("append");
+        write!(file, "eeeee\nhalf").expect("write");
+        let more = page(&harness.state, "web", Some(since), 10).expect("page");
+        assert_eq!(texts(&more), ["eeeee"], "an unfinished line is not a line yet");
+        assert_eq!(more.next_offset, since + 6);
+    }
+
+    #[test]
+    fn a_page_asked_for_nothing_still_says_where_the_log_ends() {
+        let harness = Harness::new();
+        seeded(&harness, "one\ntwo\nhalf");
+
+        let none = page(&harness.state, "web", None, 0).expect("page");
+        assert!(none.lines.is_empty());
+        assert_eq!(none.next_offset, 8, "the end of the last complete line");
+    }
+
+    #[test]
+    fn a_page_past_the_end_of_a_truncated_log_starts_over_and_says_so() {
+        let harness = Harness::new();
+        seeded(&harness, "z\n");
+
+        let after = page(&harness.state, "web", Some(500), 10).expect("page");
+        assert_eq!(texts(&after), ["z"]);
+        assert_eq!(after.lines[0].offset, 0);
+        assert!(after.truncated, "the reader's offsets are void and it has to be told");
+    }
+
+    #[test]
+    fn a_tail_longer_than_one_chunk_is_still_found() {
+        let harness = Harness::new();
+        // Each line is 100 bytes, so 5000 of them span two read chunks.
+        let line = "x".repeat(99);
+        let text: String = (0..5000).map(|_| format!("{line}\n")).collect();
+        seeded(&harness, &text);
+
+        let tail = page(&harness.state, "web", None, 3000).expect("page");
+        assert_eq!(tail.lines.len(), 3000);
+        assert_eq!(tail.lines[0].offset, 2000 * 100);
+        assert_eq!(tail.next_offset, 5000 * 100);
+    }
+
+    #[test]
+    fn a_page_of_a_service_with_no_log_is_an_error() {
+        let harness = Harness::new();
+        let error = page(&harness.state, "web", None, 10).expect_err("no log");
+        assert!(matches!(error, ServiceError::NoLog { .. }), "{error}");
+        let error = follow_from(&harness.state, "web", None, 0, Duration::from_millis(5), &mut |_| {}, &|| true)
+            .expect_err("no log");
+        assert!(matches!(error, ServiceError::NoLog { .. }), "{error}");
+    }
+
+    #[test]
+    fn follow_from_resumes_at_an_offset_and_reports_every_line_with_its_own() {
+        let harness = Harness::new();
+        let log = seeded(&harness, "old-1\nold-2\n");
+
+        let appender = log.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            let mut file = fs::OpenOptions::new().append(true).open(&appender).expect("append");
+            writeln!(file, "new-1").expect("write");
+        });
+
+        let stop_by = TestInstant::now() + FOLLOW_LIMIT;
+        let seen: std::cell::RefCell<Vec<LogEvent>> = std::cell::RefCell::new(Vec::new());
+        follow_from(
+            &harness.state,
+            "web",
+            Some(6),
+            0,
+            Duration::from_millis(5),
+            &mut |event| seen.borrow_mut().push(event),
+            &|| seen.borrow().len() < 2 && TestInstant::now() < stop_by,
+        )
+        .expect("follow");
+        writer.join().expect("writer");
+
+        assert_eq!(
+            seen.into_inner(),
+            [
+                LogEvent::Line { offset: 6, text: "old-2".to_owned() },
+                LogEvent::Line { offset: 12, text: "new-1".to_owned() },
+            ]
+        );
+    }
+
+    #[test]
+    fn follow_from_starts_with_the_backlog_when_given_no_offset() {
+        let harness = Harness::new();
+        seeded(&harness, "one\ntwo\nthree\n");
+
+        let seen: std::cell::RefCell<Vec<LogEvent>> = std::cell::RefCell::new(Vec::new());
+        let stop_by = TestInstant::now() + FOLLOW_LIMIT;
+        follow_from(
+            &harness.state,
+            "web",
+            None,
+            1,
+            Duration::from_millis(5),
+            &mut |event| seen.borrow_mut().push(event),
+            &|| seen.borrow().is_empty() && TestInstant::now() < stop_by,
+        )
+        .expect("follow");
+
+        assert_eq!(seen.into_inner(), [LogEvent::Line { offset: 8, text: "three".to_owned() }]);
+    }
+
+    #[test]
+    fn follow_from_says_when_the_log_was_truncated_under_it() {
+        let harness = Harness::new();
+        seeded(&harness, "z\n");
+
+        let seen: std::cell::RefCell<Vec<LogEvent>> = std::cell::RefCell::new(Vec::new());
+        let stop_by = TestInstant::now() + FOLLOW_LIMIT;
+        follow_from(
+            &harness.state,
+            "web",
+            Some(900),
+            0,
+            Duration::from_millis(5),
+            &mut |event| seen.borrow_mut().push(event),
+            &|| seen.borrow().len() < 2 && TestInstant::now() < stop_by,
+        )
+        .expect("follow");
+
+        assert_eq!(
+            seen.into_inner(),
+            [LogEvent::Reset { next_offset: 0 }, LogEvent::Line { offset: 0, text: "z".to_owned() }]
+        );
+    }
+
+    #[test]
+    fn follow_from_stops_partway_through_a_batch() {
+        let harness = Harness::new();
+        seeded(&harness, "one\ntwo\nthree\n");
+
+        let seen: std::cell::RefCell<Vec<LogEvent>> = std::cell::RefCell::new(Vec::new());
+        follow_from(
+            &harness.state,
+            "web",
+            Some(0),
+            0,
+            Duration::from_millis(5),
+            &mut |event| seen.borrow_mut().push(event),
+            &|| seen.borrow().is_empty(),
+        )
+        .expect("follow");
+
+        assert_eq!(seen.into_inner().len(), 1, "the stop condition is asked before every line");
     }
 
     #[test]

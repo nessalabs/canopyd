@@ -43,7 +43,7 @@ pub use proc::{ProcessRecord, ProcessState, SpawnRequest, StopOutcome};
 pub use repo::{WorktreeEntry, parse_worktree_list};
 pub use service::{RunState, ServiceContext, ServiceStatus};
 pub use setup::{SetupOptions, SetupOutcome, StepOutcome, StepResult, Stream, run_setup};
-pub use supervise::{Event, Exit, SuperviseOptions, SuperviseOutcome};
+pub use supervise::{Control, Event, Exit, Rejection, SuperviseOptions, SuperviseOutcome};
 pub use wire::{ENVELOPE_VERSION, Envelope};
 pub use worktree::{BranchSpec, CreateOptions, CreateOutcome, DeleteBranch, RemoveOptions, RemoveOutcome};
 
@@ -181,6 +181,22 @@ impl Canopy {
 
     /// The resolved environment for a branch's worktree.
     pub fn env_for(&self, branch: &str, worktree: &Utf8Path) -> Result<env::EnvTable> {
+        self.env_for_with(branch, worktree, &std::collections::BTreeMap::new())
+    }
+
+    /// [`Canopy::env_for`] with the caller's own variables layered last.
+    ///
+    /// For an embedder whose environment is richer than this crate can resolve on its own — a
+    /// database URL from a fork it made, a per-worktree setting it stores. They go through the
+    /// resolver as its override layer rather than being patched onto the finished table, so they
+    /// are tagged [`env::EnvSource::Override`], can be interpolated by a service's own `env:`
+    /// through `${env.KEY}`, and land in the written env file like everything else.
+    pub fn env_for_with(
+        &self,
+        branch: &str,
+        worktree: &Utf8Path,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Result<env::EnvTable> {
         let ports = self.ports_for(branch)?;
         let default_config = config::CanopyConfig::empty();
         let config = self.config().and_then(|(_, parsed)| parsed.config.as_ref()).unwrap_or(&default_config);
@@ -198,7 +214,7 @@ impl Canopy {
             project_path: &project_path,
             ports: &ports,
         };
-        Ok(env::resolve(config, &facts, &std::collections::BTreeMap::new()))
+        Ok(env::resolve(config, &facts, overrides))
     }
 
     /// Where every worktree's state lives. `doctor` and `gc` walk this to find debris.
