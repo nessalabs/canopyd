@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod container;
 pub mod copy;
 pub mod db;
 pub mod doctor;
