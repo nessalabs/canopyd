@@ -7,7 +7,7 @@
 //! daemon into existence. `up` has no restart policy because nothing would be left running to
 //! honour it.
 //!
-//! Four decisions carry the module:
+//! Five decisions carry the module:
 //!
 //! - **A failing health check is reported, never acted on.** Restarting an unhealthy service
 //!   sounds obviously right and is the single most dangerous thing a supervisor can do: a check
@@ -26,6 +26,12 @@
 //!   possible at all — see [`observe_exit`]. `up` exits seconds after spawning, which reparents
 //!   its children to init; init reaps them, and an `up` that waited would only be waiting for a
 //!   service it is about to walk away from.
+//! - **Requests come in through the loop, not around it.** An embedder that wants one service
+//!   stopped cannot call `down` from another process: the exit would look like a crash, and
+//!   `restart: always` would undo it a second later. It hands a [`Control`] to the loop instead,
+//!   which stops the service itself and then *holds* it — out of reach of the restart policy
+//!   until somebody asks for it back. The services stay this process's children either way, so
+//!   an exit status is still readable after a requested restart.
 //! - **No signal handler in here.** `run` takes a `should_stop` flag and a [`Clock`]. A library
 //!   that installed a `SIGINT` handler would steal it from every embedder, and tests of a
 //!   supervisor that owned real signals and real time would be slow and flaky. The binary owns
@@ -164,13 +170,40 @@ impl fmt::Display for Exit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    Started { name: String, pid: i32 },
-    Healthy { name: String },
-    Unhealthy { name: String, detail: String },
-    Exited { name: String, status: Exit },
-    Restarting { name: String, attempt: u32, delay_ms: u64 },
-    GaveUp { name: String, restarts: u32 },
-    Stopped { name: String },
+    Started {
+        name: String,
+        pid: i32,
+    },
+    Healthy {
+        name: String,
+    },
+    Unhealthy {
+        name: String,
+        detail: String,
+    },
+    Exited {
+        name: String,
+        status: Exit,
+    },
+    Restarting {
+        name: String,
+        attempt: u32,
+        delay_ms: u64,
+    },
+    GaveUp {
+        name: String,
+        restarts: u32,
+    },
+    Stopped {
+        name: String,
+    },
+    /// A [`Control`] that could not be honoured, with the request as it was made. Reported
+    /// rather than returned because whoever sent it is on the other end of a stream, and the
+    /// supervisor's job — keeping everything else alive — does not stop for a bad request.
+    Rejected {
+        request: String,
+        detail: String,
+    },
 }
 
 impl fmt::Display for Event {
@@ -185,6 +218,57 @@ impl fmt::Display for Event {
             }
             Event::GaveUp { name, restarts } => write!(f, "{name} gave up after {restarts} restarts"),
             Event::Stopped { name } => write!(f, "{name} stopped"),
+            Event::Rejected { request, detail } => write!(f, "rejected `{request}`: {detail}"),
+        }
+    }
+}
+
+/// Something asked of a supervisor while it runs.
+///
+/// A requested stop is not an exit: the service is *held*, which means the restart policy does
+/// not apply to it and it stays down until a `Start` or `Restart` names it. A requested start
+/// wipes the service's restart history, because a person deciding to try again is new
+/// information — the crash-loop budget exists to stop a machine retrying, not a human.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Control {
+    Start(String),
+    Stop(String),
+    Restart(String),
+}
+
+impl Control {
+    /// The service the request is about.
+    pub fn service(&self) -> &str {
+        match self {
+            Control::Start(name) | Control::Stop(name) | Control::Restart(name) => name,
+        }
+    }
+}
+
+impl fmt::Display for Control {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Control::Start(name) => write!(f, "start {name}"),
+            Control::Stop(name) => write!(f, "stop {name}"),
+            Control::Restart(name) => write!(f, "restart {name}"),
+        }
+    }
+}
+
+/// `start web`, `stop web`, `restart web` — the line protocol `canopyd run --control` reads.
+impl std::str::FromStr for Control {
+    type Err = String;
+
+    fn from_str(line: &str) -> Result<Control, String> {
+        let mut words = line.split_whitespace();
+        let (Some(verb), Some(name), None) = (words.next(), words.next(), words.next()) else {
+            return Err("expected `<start|stop|restart> <service>`".to_owned());
+        };
+        match verb {
+            "start" => Ok(Control::Start(name.to_owned())),
+            "stop" => Ok(Control::Stop(name.to_owned())),
+            "restart" => Ok(Control::Restart(name.to_owned())),
+            other => Err(format!("unknown request {other:?} — expected start, stop or restart")),
         }
     }
 }
@@ -311,6 +395,8 @@ enum Phase {
     Exited,
     /// The crash-loop budget is spent. Terminal, and reported as `failed`.
     GaveUp,
+    /// Stopped because a [`Control`] asked. Nothing restarts it but another request.
+    Held,
 }
 
 /// A service's health check and how far its own poll loop has got.
@@ -467,6 +553,50 @@ impl<'a> Supervised<'a> {
         }
     }
 
+    /// Stops the service because somebody asked, and holds it. `false` when it could not be
+    /// stopped — a pid we will not signal, a runtime we do not drive — in which case nothing has
+    /// changed and the request is reported as rejected.
+    fn hold(
+        &mut self,
+        request: &Control,
+        services: &BTreeMap<String, ServiceSpec>,
+        ctx: &ServiceContext<'_>,
+        on_event: &mut dyn FnMut(Event),
+    ) -> Result<bool, ServiceError> {
+        let only = BTreeSet::from([self.name.clone()]);
+        let mut held = false;
+        // Asked for one declared service by name, so one status comes back.
+        for status in service::down(services, Some(&only), ctx)? {
+            if status.state == RunState::Stopped {
+                self.last = status;
+                self.phase = Phase::Held;
+                on_event(Event::Stopped { name: self.name.clone() });
+                held = true;
+            } else {
+                // `down` always says why: the signal it would not send, the runtime it cannot drive.
+                on_event(Event::Rejected { request: request.to_string(), detail: status.detail.unwrap_or_default() });
+            }
+        }
+        Ok(held)
+    }
+
+    /// Starts the service because somebody asked, with a clean restart history. A service that
+    /// is already running is left exactly as it is.
+    fn resume(
+        &mut self,
+        services: &BTreeMap<String, ServiceSpec>,
+        ctx: &ServiceContext<'_>,
+        opts: &SuperviseOptions,
+        now: u64,
+        on_event: &mut dyn FnMut(Event),
+    ) {
+        if matches!(self.phase, Phase::Running { .. }) {
+            return;
+        }
+        self.restarts = Restarts::default();
+        self.start(services, ctx, opts, now, on_event);
+    }
+
     /// One poll: notice an exit, act on it, then ask the health check how it is doing.
     fn tick(
         &mut self,
@@ -566,6 +696,26 @@ pub fn run(
     should_stop: &dyn Fn() -> bool,
     on_event: &mut dyn FnMut(Event),
 ) -> Result<SuperviseOutcome, ServiceError> {
+    run_with(services, only, ctx, opts, clock, should_stop, &mut Vec::new, on_event)
+}
+
+/// [`run`], taking requests while it runs.
+///
+/// `controls` is asked once per poll for whatever has arrived since the last one, the same way
+/// `should_stop` is: the caller owns where requests come from — a pipe, a channel, a test — and
+/// this owns what they mean. An `Err` is a request that could not even be read, and is reported
+/// as [`Event::Rejected`] like one that could not be honoured.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with(
+    services: &BTreeMap<String, ServiceSpec>,
+    only: Option<&BTreeSet<String>>,
+    ctx: &ServiceContext<'_>,
+    opts: &SuperviseOptions,
+    clock: &impl Clock,
+    should_stop: &dyn Fn() -> bool,
+    controls: &mut dyn FnMut() -> Vec<Result<Control, Rejection>>,
+    on_event: &mut dyn FnMut(Event),
+) -> Result<SuperviseOutcome, ServiceError> {
     // `up` is the one that validates: an unknown `--only` name and a `depends_on` cycle both
     // come back from here, before anything has been started.
     let started = service::up(services, only, ctx, false)?;
@@ -580,6 +730,12 @@ pub fn run(
 
     while !should_stop() {
         let now = clock.now();
+        for request in controls() {
+            match request {
+                Ok(control) => apply(&control, &mut watch, services, ctx, opts, now, on_event)?,
+                Err(Rejection { request, detail }) => on_event(Event::Rejected { request, detail }),
+            }
+        }
         for service in &mut watch {
             service.tick(services, ctx, opts, now, on_event);
         }
@@ -587,6 +743,54 @@ pub fn run(
     }
 
     finish(watch, services, only, ctx, opts, on_event)
+}
+
+/// A request that never became a [`Control`]: the text as it arrived, and what was wrong with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejection {
+    pub request: String,
+    pub detail: String,
+}
+
+/// Carries out one request against the services being watched.
+fn apply<'a>(
+    control: &Control,
+    watch: &mut Vec<Supervised<'a>>,
+    services: &'a BTreeMap<String, ServiceSpec>,
+    ctx: &ServiceContext<'_>,
+    opts: &SuperviseOptions,
+    now: u64,
+    on_event: &mut dyn FnMut(Event),
+) -> Result<(), ServiceError> {
+    let name = control.service();
+    let index = match watch.iter().position(|service| service.name == name) {
+        Some(index) => index,
+        // Declared, but outside what this run was started with — `--only`, most often. Asking
+        // for it by name is how it joins, the same way naming an `autostart: false` service does.
+        None => match services.get(name) {
+            Some(spec) => {
+                watch.push(Supervised::new(spec, ctx, ServiceStatus::new(name, spec, RunState::Stopped)));
+                watch.len() - 1
+            }
+            None => {
+                on_event(Event::Rejected { request: control.to_string(), detail: format!("no service named {name}") });
+                return Ok(());
+            }
+        },
+    };
+    let service = &mut watch[index];
+    match control {
+        Control::Stop(_) => {
+            service.hold(control, services, ctx, on_event)?;
+        }
+        Control::Start(_) => service.resume(services, ctx, opts, now, on_event),
+        Control::Restart(_) => {
+            if service.hold(control, services, ctx, on_event)? {
+                service.resume(services, ctx, opts, now, on_event);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Stops everything and assembles the outcome.
@@ -598,11 +802,16 @@ fn finish(
     opts: &SuperviseOptions,
     on_event: &mut dyn FnMut(Event),
 ) -> Result<SuperviseOutcome, ServiceError> {
+    // A held service said `stopped` when it was stopped. Saying it again on the way out would
+    // report something that did not happen twice.
     let idle: BTreeSet<String> =
-        watch.iter().filter(|s| matches!(s.phase, Phase::Idle)).map(|s| s.name.clone()).collect();
+        watch.iter().filter(|s| matches!(s.phase, Phase::Idle | Phase::Held)).map(|s| s.name.clone()).collect();
     // `down` stops in reverse dependency order and reports in the order it stopped things, so
     // the events go out in the order they actually happened.
-    let stopped = service::down(services, only, ctx)?;
+    // With `--only`, a service that joined by request is being watched too, and stopping the
+    // original selection alone would walk away from it.
+    let watched: BTreeSet<String> = watch.iter().map(|s| s.name.clone()).collect();
+    let stopped = service::down(services, only.map(|_| &watched), ctx)?;
     for status in &stopped {
         if !idle.contains(&status.name) {
             on_event(Event::Stopped { name: status.name.clone() });
@@ -823,6 +1032,7 @@ mod tests {
             | Event::Restarting { name, .. }
             | Event::GaveUp { name, .. }
             | Event::Stopped { name } => name,
+            Event::Rejected { request, .. } => request,
         }
     }
 
@@ -1770,5 +1980,262 @@ web:
                 "web stopped",
             ]
         );
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Requests
+    // -----------------------------------------------------------------------------------
+
+    /// [`supervise`] for a run that is sent requests. `script` is asked once per poll, with
+    /// everything reported so far, so a test sends a request at a known moment.
+    fn direct(
+        harness: &Harness,
+        services: &BTreeMap<String, ServiceSpec>,
+        only: Option<&BTreeSet<String>>,
+        opts: &SuperviseOptions,
+        mut script: impl FnMut(&[(u64, Event)]) -> Vec<Result<Control, Rejection>>,
+        stop: impl Fn(&[(u64, Event)], u32) -> bool,
+    ) -> Session {
+        let clock = TestClock::new();
+        let events: RefCell<Vec<(u64, Event)>> = RefCell::new(Vec::new());
+        let polls = Cell::new(0u32);
+        let should_stop = || {
+            polls.set(polls.get().saturating_add(1));
+            polls.get() > MAX_POLLS || stop(&events.borrow(), polls.get())
+        };
+        let mut controls = || {
+            let seen = events.borrow().clone();
+            script(&seen)
+        };
+        let mut on_event = |event: Event| events.borrow_mut().push((clock.now(), event));
+        let facts = harness.facts();
+        let ctx = harness.ctx(&facts);
+        let outcome =
+            run_with(services, only, &ctx, opts, &clock, &should_stop, &mut controls, &mut on_event).expect("run");
+        assert!(polls.get() <= MAX_POLLS, "the run hit its ceiling of {MAX_POLLS} polls, not its stop condition");
+        Session { outcome, events: events.into_inner() }
+    }
+
+    /// Sends `request` exactly once: on the first poll after `pick` has matched `n` times.
+    fn once_after(
+        pick: fn(&Event) -> bool,
+        n: usize,
+        request: &str,
+    ) -> impl FnMut(&[(u64, Event)]) -> Vec<Result<Control, Rejection>> {
+        let request = request.to_owned();
+        let mut sent = false;
+        move |events| {
+            if sent || events.iter().filter(|(_, event)| pick(event)).count() < n {
+                return Vec::new();
+            }
+            sent = true;
+            vec![request.parse::<Control>().map_err(|detail| Rejection { request: request.clone(), detail })]
+        }
+    }
+
+    /// Stops `grace` polls after `pick` has matched `n` times, or after [`GIVE_UP`].
+    fn seen(pick: fn(&Event) -> bool, n: usize, grace: u32) -> impl Fn(&[(u64, Event)], u32) -> bool {
+        let reached: Cell<Option<u32>> = Cell::new(None);
+        let deadline = TestInstant::now() + GIVE_UP;
+        move |events, count| {
+            if reached.get().is_none() && events.iter().filter(|(_, event)| pick(event)).count() >= n {
+                reached.set(Some(count));
+            }
+            TestInstant::now() >= deadline || reached.get().is_some_and(|at| count >= at.saturating_add(grace))
+        }
+    }
+
+    fn is_rejected(event: &Event) -> bool {
+        matches!(event, Event::Rejected { .. })
+    }
+
+    /// Runs until the test says otherwise, and would be restarted by any policy that restarts.
+    fn long_lived(names: &[&str]) -> BTreeMap<String, ServiceSpec> {
+        let yaml: String = names
+            .iter()
+            .map(|name| {
+                format!("\n{name}:\n  run: \"until [ -f die ]; do sleep 0.05; done; exit 1\"\n  restart: always\n")
+            })
+            .collect();
+        specs(&yaml)
+    }
+
+    #[rstest]
+    #[case("start web", Control::Start("web".to_owned()))]
+    #[case("stop web", Control::Stop("web".to_owned()))]
+    #[case("  restart   web  ", Control::Restart("web".to_owned()))]
+    fn a_request_is_a_verb_and_a_service(#[case] line: &str, #[case] expected: Control) {
+        let parsed: Control = line.parse().expect("parses");
+        assert_eq!(parsed, expected);
+        assert_eq!(parsed.service(), "web");
+        // What it prints is what it parses, so a rejection can quote the request back.
+        assert_eq!(parsed.to_string().parse::<Control>().expect("round trip"), expected);
+    }
+
+    #[rstest]
+    #[case("", "expected `<start|stop|restart> <service>`")]
+    #[case("stop", "expected `<start|stop|restart> <service>`")]
+    #[case("stop web now", "expected `<start|stop|restart> <service>`")]
+    #[case("juggle web", "unknown request \"juggle\" — expected start, stop or restart")]
+    fn a_malformed_request_says_what_was_expected(#[case] line: &str, #[case] expected: &str) {
+        assert_eq!(line.parse::<Control>().expect_err("rejected"), expected);
+    }
+
+    #[test]
+    fn a_requested_stop_holds_a_service_its_policy_would_restart() {
+        let harness = Harness::new();
+        let services = long_lived(&["web"]);
+
+        let session = direct(
+            &harness,
+            &services,
+            None,
+            &options(100),
+            once_after(is_started, 1, "stop web"),
+            settles(is_stopped, 20),
+        );
+
+        // Twenty polls after the stop and `restart: always` has done nothing: it is held.
+        assert_eq!(session.count(is_started), 1, "{:?}", session.kinds());
+        assert_eq!(session.count(is_restarting), 0, "{:?}", session.kinds());
+        // A stop we asked for is not an exit we observed.
+        assert_eq!(session.count(is_exited), 0, "{:?}", session.kinds());
+        // Said once, when it happened — not again on the way out.
+        assert_eq!(session.count(is_stopped), 1, "{:?}", session.kinds());
+        assert_eq!(session.outcome.services[0].state, RunState::Stopped);
+        assert!(zombies_among(&started_pids(&session.kinds())).is_empty(), "the held service was never collected");
+    }
+
+    #[test]
+    fn a_requested_start_brings_a_held_service_back() {
+        let harness = Harness::new();
+        let services = long_lived(&["web"]);
+        let mut stop = once_after(is_started, 1, "stop web");
+        let mut start = once_after(is_stopped, 1, "start web");
+
+        let session = direct(
+            &harness,
+            &services,
+            None,
+            &options(100),
+            |events| stop(events).into_iter().chain(start(events)).collect(),
+            seen(is_started, 2, 3),
+        );
+
+        let pids = started_pids(&session.kinds());
+        assert_eq!(pids.len(), 2, "{:?}", session.kinds());
+        assert_ne!(pids[0], pids[1], "a start after a stop is a new process");
+        assert_eq!(session.named(is_stopped), ["web", "web"], "once when held, once on the way out");
+    }
+
+    #[test]
+    fn a_requested_start_leaves_a_running_service_alone() {
+        let harness = Harness::new();
+        let services = long_lived(&["web"]);
+
+        let session =
+            direct(&harness, &services, None, &options(100), once_after(is_started, 1, "start web"), polls(20));
+
+        assert_eq!(session.count(is_started), 1, "{:?}", session.kinds());
+        assert_eq!(session.count(is_rejected), 0, "already running is not an error");
+    }
+
+    #[test]
+    fn a_requested_restart_is_a_stop_and_a_start() {
+        let harness = Harness::new();
+        let services = long_lived(&["web"]);
+
+        let session = direct(
+            &harness,
+            &services,
+            None,
+            &options(100),
+            once_after(is_started, 1, "restart web"),
+            seen(is_started, 2, 3),
+        );
+
+        let kinds = session.kinds();
+        assert!(matches!(kinds[0], Event::Started { .. }), "{kinds:?}");
+        assert_eq!(kinds[1], Event::Stopped { name: "web".to_owned() });
+        assert!(matches!(kinds[2], Event::Started { .. }), "{kinds:?}");
+        let pids = started_pids(&session.kinds());
+        assert_ne!(pids[0], pids[1]);
+        // Asked for, so it is not one of the restarts the outcome counts against the service.
+        assert_eq!(session.outcome.restarts, 0);
+    }
+
+    #[test]
+    fn a_requested_start_gives_a_service_that_gave_up_a_fresh_budget() {
+        let harness = Harness::new();
+        let services = instantly(1, "always");
+        let opts = SuperviseOptions {
+            backoff: Backoff { base: Duration::from_millis(10), max: Duration::from_millis(10) },
+            budget: Budget { restarts: 1, window: Duration::from_secs(60) },
+            ..options(10)
+        };
+
+        let session =
+            direct(&harness, &services, None, &opts, once_after(is_gave_up, 1, "start web"), seen(is_gave_up, 2, 1));
+
+        // One restart is the whole budget, and the window is far longer than this run. A second
+        // `restarting` can only mean the request wiped the history.
+        assert_eq!(session.count(is_restarting), 2, "{:?}", session.kinds());
+        assert_eq!(session.count(is_gave_up), 2, "{:?}", session.kinds());
+    }
+
+    #[test]
+    fn a_request_for_a_service_outside_the_selection_brings_it_under_supervision() {
+        let harness = Harness::new();
+        let services = long_lived(&["extra", "web"]);
+        let only = BTreeSet::from(["web".to_owned()]);
+
+        let session = direct(
+            &harness,
+            &services,
+            Some(&only),
+            &options(100),
+            once_after(is_started, 1, "start extra"),
+            seen(is_started, 2, 3),
+        );
+
+        assert_eq!(session.named(is_started), ["web", "extra"]);
+        // It joined, so it is stopped with everything else rather than left behind.
+        let mut stopped = session.named(is_stopped);
+        stopped.sort_unstable();
+        assert_eq!(stopped, ["extra", "web"]);
+        assert!(!record_path(&harness.state, "extra").exists(), "the joiner outlived the run");
+    }
+
+    #[test]
+    fn a_request_that_cannot_be_honoured_is_rejected_and_nothing_else_changes() {
+        let harness = Harness::new();
+        let services = specs("\ndb:\n  runtime: docker\n  run: \"sleep 30\"\nweb:\n  run: \"sleep 30\"\n");
+        let mut unknown = once_after(is_started, 1, "stop nope");
+        let mut unsupported = once_after(is_started, 1, "restart db");
+        let mut garbled = once_after(is_started, 1, "juggle web");
+
+        let session = direct(
+            &harness,
+            &services,
+            None,
+            &options(100),
+            |events| unknown(events).into_iter().chain(unsupported(events)).chain(garbled(events)).collect(),
+            seen(is_rejected, 3, 2),
+        );
+
+        let rejected: Vec<Event> = session.kinds().into_iter().filter(is_rejected).collect();
+        assert_eq!(
+            rejected[0],
+            Event::Rejected { request: "stop nope".to_owned(), detail: "no service named nope".to_owned() }
+        );
+        let Event::Rejected { request, detail } = &rejected[1] else { unreachable!() };
+        assert_eq!(request, "restart db");
+        assert!(detail.contains("runtime docker is not supported"), "{detail}");
+        assert_eq!(
+            rejected[2].to_string(),
+            "rejected `juggle web`: unknown request \"juggle\" — expected start, stop or restart"
+        );
+        // The service that was running is still the one process it started as.
+        assert_eq!(session.named(is_started), ["web"]);
     }
 }

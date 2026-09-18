@@ -43,7 +43,7 @@ pub use proc::{ProcessRecord, ProcessState, SpawnRequest, StopOutcome};
 pub use repo::{WorktreeEntry, parse_worktree_list};
 pub use service::{RunState, ServiceContext, ServiceStatus};
 pub use setup::{SetupOptions, SetupOutcome, StepOutcome, StepResult, Stream, run_setup};
-pub use supervise::{Event, Exit, SuperviseOptions, SuperviseOutcome};
+pub use supervise::{Control, Event, Exit, Rejection, SuperviseOptions, SuperviseOutcome};
 pub use wire::{ENVELOPE_VERSION, Envelope};
 pub use worktree::{BranchSpec, CreateOptions, CreateOutcome, DeleteBranch, RemoveOptions, RemoveOutcome};
 

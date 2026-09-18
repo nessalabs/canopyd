@@ -183,7 +183,7 @@ pub struct ServiceStatus {
 }
 
 impl ServiceStatus {
-    fn new(name: &str, spec: &ServiceSpec, state: RunState) -> ServiceStatus {
+    pub(crate) fn new(name: &str, spec: &ServiceSpec, state: RunState) -> ServiceStatus {
         ServiceStatus {
             name: name.to_owned(),
             state,

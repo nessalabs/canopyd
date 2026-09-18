@@ -195,6 +195,11 @@ enum Command {
         restarts: Option<u32>,
         #[arg(long)]
         restart_window: Option<String>,
+        /// Take `start <service>`, `stop <service>` and `restart <service>` on stdin, one per
+        /// line. End of input stops everything, so an embedder that dies takes its services
+        /// with it instead of orphaning them.
+        #[arg(long)]
+        control: bool,
         /// Add or override an environment variable, as `KEY=VALUE`. Repeatable. Layered last,
         /// for an embedder that knows things this crate cannot resolve — see `setup --env`.
         #[arg(long = "env")]
@@ -650,6 +655,7 @@ fn run(cli: &Cli) -> Result<u8> {
             ref backoff_max,
             restarts,
             ref restart_window,
+            control,
             ref env_overrides,
         } => {
             let (_, worktree, state, env, facts_owner) = service_context(&canopy, branch.as_deref(), env_overrides)?;
@@ -696,14 +702,38 @@ fn run(cli: &Cli) -> Result<u8> {
                 }
             };
 
+            // Requests arrive on a thread of their own because a blocking read of stdin and a poll
+            // loop cannot share one. The loop drains whatever has arrived, once per poll.
+            let (requests, inbox) = std::sync::mpsc::channel::<String>();
+            if control {
+                let stopping = stopping.clone();
+                std::thread::spawn(move || {
+                    for line in std::io::stdin().lines().map_while(std::io::Result::ok) {
+                        let _ = requests.send(line);
+                    }
+                    stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+            let mut controls = || {
+                inbox
+                    .try_iter()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| {
+                        line.parse::<canopyd::Control>()
+                            .map_err(|detail| canopyd::Rejection { request: line.trim().to_owned(), detail })
+                    })
+                    .collect::<Vec<_>>()
+            };
+
             let clock = canopyd::health::SystemClock::new();
-            let outcome = canopyd::supervise::run(
+            let outcome = canopyd::supervise::run_with(
                 &config.services,
                 selection(only).as_ref(),
                 &ctx,
                 &opts,
                 &clock,
                 &|| stopping.load(std::sync::atomic::Ordering::Relaxed),
+                &mut controls,
                 &mut on_event,
             )?;
 

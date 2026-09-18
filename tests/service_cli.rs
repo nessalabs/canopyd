@@ -332,6 +332,60 @@ fn run_supervises_in_the_foreground_and_shuts_down_cleanly() {
     assert_eq!(processes_matching(&fg), 0, "a child outlived the supervisor");
 }
 
+#[test]
+fn run_takes_requests_on_stdin_and_stops_when_stdin_closes() {
+    use std::io::{Read, Write};
+
+    // What an embedder does: hold `run` as a child, steer single services through its stdin, and
+    // rely on a closed pipe — its own death included — to take the services down with it.
+    let tag = marker("control");
+    let (fx, _wt) = prepared(&format!("  web:\n    run: {}\n    restart: always\n", sleeper(&tag)));
+    let mut child = fx
+        .cwt()
+        .args(["run", "feat/x", "--json", "--control"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn run");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let settle = |want: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while processes_matching(&tag) != want && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        processes_matching(&tag)
+    };
+    assert_eq!(settle(1), 1, "the service never started");
+
+    writeln!(stdin, "stop web").unwrap();
+    assert_eq!(settle(0), 0, "stop did not stop it");
+    // Held: several polls later `restart: always` still has not brought it back.
+    std::thread::sleep(std::time::Duration::from_millis(900));
+    assert_eq!(processes_matching(&tag), 0, "a requested stop was treated as a crash");
+
+    writeln!(stdin, "start web").unwrap();
+    assert_eq!(settle(1), 1, "start did not start it");
+
+    writeln!(stdin, "juggle web").unwrap();
+    // Long enough for the loop to read the line before the pipe closing ends the run.
+    std::thread::sleep(std::time::Duration::from_millis(900));
+    drop(stdin);
+
+    let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(20)).expect("run exited");
+    assert!(status.success(), "a closed control pipe is a clean shutdown");
+    assert_eq!(settle(0), 0, "the service outlived the supervisor");
+
+    let mut events = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut events).unwrap();
+    assert_eq!(events.matches(r#""event":"started""#).count(), 2, "{events}");
+    assert_eq!(events.matches(r#""event":"stopped""#).count(), 2, "{events}");
+    assert!(events.contains(r#""event":"rejected","request":"juggle web""#), "{events}");
+    let mut envelope = Vec::new();
+    child.stdout.take().unwrap().read_to_end(&mut envelope).unwrap();
+    assert_eq!(ok_envelope(&envelope)["command"], "run");
+}
+
 /// SIGINT without `unsafe`: `kill` the way a shell does it.
 fn unsafe_free_sigint(pid: u32) {
     std::process::Command::new("kill").args(["-INT", &pid.to_string()]).status().expect("kill");

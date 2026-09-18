@@ -155,6 +155,30 @@ Prints a starter `canopy.yaml` on stdout and writes nothing — redirect it your
 command that works outside a repository, since creating the file is sometimes the first thing
 you do in a new directory.
 
+### `run`: events while it runs
+
+`run --json` is the one command that speaks before it finishes. **stdout** is still exactly one
+envelope, printed when the run ends (`data.services`, `data.restarts`). **stderr** carries one
+JSON object per line as things happen, each tagged by `event`:
+
+| `event` | Fields | Meaning |
+|---|---|---|
+| `started` | `name`, `pid` | a process is up; `pid` leads its process group |
+| `healthy` | `name` | its health check passed (reported on change, not every interval) |
+| `unhealthy` | `name`, `detail` | its health check is failing — reported, never acted on |
+| `exited` | `name`, `status` | it ended by itself; `status` is `{"exit":"code","code":1}`, `{"exit":"signal","signal":9}` or `{"exit":"unknown"}` |
+| `restarting` | `name`, `attempt`, `delay_ms` | the policy will start it again after the delay |
+| `gave_up` | `name`, `restarts` | the crash-loop budget is spent; it stays down |
+| `stopped` | `name` | stopped on purpose: a `stop` request, or shutdown |
+| `rejected` | `request`, `detail` | a `--control` request that could not be honoured |
+
+```console
+$ canopyd run feat/login --json --control 2>events.ndjson <requests
+```
+
+With `--control`, requests are lines on stdin — `start web`, `stop web`, `restart web` — and
+end of input ends the run. See the [command reference](cli.md) for what each one means.
+
 ## Using it from a script
 
 ```bash
