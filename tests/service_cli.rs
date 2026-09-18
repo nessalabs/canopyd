@@ -78,6 +78,25 @@ fn up_starts_a_service_and_ps_reports_it_running() {
 }
 
 #[test]
+fn up_hands_env_overrides_to_the_service() {
+    // What an embedder needs `--env` for: a value this crate could never resolve by itself.
+    let tag = marker("env-override");
+    let sleep = sleeper(&tag);
+    let (fx, wt) = prepared(&format!("  web:\n    run: echo \"$DATABASE_URL\" > seen.txt; {sleep}\n"));
+
+    run(&fx, &["up", "feat/x", "--no-wait", "--env", "DATABASE_URL=postgres://db/fork"]);
+
+    let seen = wt.join("seen.txt");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !seen.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(std::fs::read_to_string(&seen).unwrap_or_default().trim(), "postgres://db/fork");
+
+    stop_all(&fx);
+}
+
+#[test]
 fn up_is_idempotent() {
     let tag = marker("idempotent");
     let sleep = sleeper(&tag);

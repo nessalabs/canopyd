@@ -193,6 +193,67 @@ fn env_json_masks_secrets_but_the_file_does_not() {
 }
 
 #[test]
+fn env_overrides_are_layered_last_and_say_where_they_came_from() {
+    let fx = Fixture::new();
+    fx.write("canopy.yaml", CONFIG);
+
+    let out = fx
+        .cwt()
+        .args(["env", "main", "--json", "--env", "BASE=/elsewhere", "--env", "DATABASE_URL=postgres://db/one"])
+        .args(["--env", "DATABASE_URL=postgres://db/two"])
+        .output()
+        .unwrap();
+    let vars = ok_envelope(&out.stdout)["data"].as_array().unwrap().clone();
+    let var = |key: &str| vars.iter().find(|v| v["key"] == key).unwrap_or_else(|| panic!("{key} missing: {vars:?}"));
+
+    // An override replaces what the file said, and the table says an override did it.
+    assert_eq!(var("BASE")["value"], "/elsewhere");
+    assert_eq!(var("BASE")["source"], "override");
+    // A flag given twice means what it means everywhere else: the last one.
+    assert_eq!(var("DATABASE_URL")["value"], "postgres://db/two");
+    // Untouched keys are untouched.
+    assert_eq!(var("API_TOKEN")["source"], "config");
+}
+
+#[test]
+fn env_reveal_is_the_json_view_with_the_real_values() {
+    let fx = Fixture::new();
+    fx.write("canopy.yaml", CONFIG);
+
+    let out = fx.cwt().args(["env", "main", "--json", "--reveal"]).output().unwrap();
+    let vars = ok_envelope(&out.stdout)["data"].as_array().unwrap().clone();
+    let token = vars.iter().find(|v| v["key"] == "API_TOKEN").expect("API_TOKEN present");
+    assert_eq!(token["value"], "hunter2", "an embedder that stores the table needs the value");
+    assert!(token["secret"].as_bool().unwrap(), "and still needs to know to mask it");
+
+    // `--reveal` changes what the JSON view holds. It does not turn the plain listing into JSON.
+    let plain = fx.cwt().args(["env", "main", "--reveal"]).output().unwrap();
+    let text = String::from_utf8(plain.stdout).unwrap();
+    assert!(text.starts_with("API_TOKEN=") || text.contains("\nAPI_TOKEN="), "{text}");
+    assert!(!text.trim_start().starts_with('{'), "{text}");
+}
+
+#[test]
+fn env_write_puts_overrides_in_the_file() {
+    let fx = Fixture::new();
+    fx.write("canopy.yaml", CONFIG);
+
+    let out = fx.cwt().args(["env", "main", "--write", "--env", "DATABASE_URL=postgres://db/fork"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let file = std::fs::read_to_string(fx.root.join(".env.canopy")).unwrap();
+    assert!(file.contains("DATABASE_URL=postgres://db/fork"), "{file}");
+}
+
+#[test]
+fn a_malformed_env_override_is_refused() {
+    let fx = Fixture::new();
+    fx.write("canopy.yaml", CONFIG);
+
+    let out = fx.cwt().args(["env", "main", "--json", "--env", "NO_EQUALS_SIGN"]).output().unwrap();
+    err_envelope(&out.stdout, "config_invalid");
+}
+
+#[test]
 fn env_export_is_valid_shell() {
     let fx = Fixture::new();
     fx.write(
