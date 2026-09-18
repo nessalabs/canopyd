@@ -195,7 +195,7 @@ impl ServiceStatus {
         }
     }
 
-    fn detail(mut self, detail: impl Into<String>) -> ServiceStatus {
+    pub(crate) fn detail(mut self, detail: impl Into<String>) -> ServiceStatus {
         self.detail = Some(detail.into());
         self
     }
@@ -263,9 +263,19 @@ pub fn up(
     Ok(out)
 }
 
+/// The order `up` would act in, validated the way `up` validates: an unknown `only` name and a
+/// `depends_on` cycle are errors here, before anything has been started. For a caller that
+/// starts services one at a time — [`crate::supervise`] does, to wait for dependencies.
+pub(crate) fn order(
+    services: &BTreeMap<String, ServiceSpec>,
+    only: Option<&BTreeSet<String>>,
+) -> Result<Vec<String>, ServiceError> {
+    plan(services, only)
+}
+
 /// `autostart: false` means "declared, but not part of `up`". Naming it explicitly overrides
 /// that — a service you start by hand is the entire point of the flag.
-fn should_skip(spec: &ServiceSpec, named: bool) -> bool {
+pub(crate) fn should_skip(spec: &ServiceSpec, named: bool) -> bool {
     !spec.autostart && !named
 }
 

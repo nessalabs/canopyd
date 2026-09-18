@@ -7,7 +7,7 @@
 //! daemon into existence. `up` has no restart policy because nothing would be left running to
 //! honour it.
 //!
-//! Five decisions carry the module:
+//! Six decisions carry the module:
 //!
 //! - **A failing health check is reported, never acted on.** Restarting an unhealthy service
 //!   sounds obviously right and is the single most dangerous thing a supervisor can do: a check
@@ -26,6 +26,12 @@
 //!   possible at all — see [`observe_exit`]. `up` exits seconds after spawning, which reparents
 //!   its children to init; init reaps them, and an `up` that waited would only be waiting for a
 //!   service it is about to walk away from.
+//! - **A dependent waits for its dependency to be serving, and not forever.** `depends_on` with
+//!   a health check means "start me once that one answers", which is the only reading that
+//!   makes a web server that reads a token its API writes at boot work at all. But a check that
+//!   never passes must not mean a dependent that never starts: once the dependency has had its
+//!   whole health window and a little more, the dependent starts anyway, and the failing check
+//!   is reported on the dependency where it belongs.
 //! - **Requests come in through the loop, not around it.** An embedder that wants one service
 //!   stopped cannot call `down` from another process: the exit would look like a crash, and
 //!   `restart: always` would undo it a second later. It hands a [`Control`] to the loop instead,
@@ -57,6 +63,12 @@ use crate::service::{self, RunState, ServiceContext, ServiceError, ServiceStatus
 /// no benefit a human can perceive; a second would leave a Ctrl-C hanging long enough to press
 /// it again.
 pub const DEFAULT_POLL: Duration = Duration::from_millis(250);
+
+/// How long past a dependency's own health window its dependents keep waiting.
+///
+/// The window — `start_period` plus `retries` intervals — is how long the check is allowed to
+/// take to pass. This is the slack on top, for a probe that was in flight when it closed.
+const DEPENDENCY_SLACK: Duration = Duration::from_secs(5);
 
 /// The most a restart delay may be doubled.
 ///
@@ -383,6 +395,8 @@ fn observe_exit(record: &ProcessRecord) -> Option<Exit> {
 enum Phase {
     /// Not supervised: an unsupported runtime, `autostart: false`, or a record we cannot read.
     Idle,
+    /// Not started yet: something it depends on is not serving.
+    Pending,
     Running {
         record: ProcessRecord,
         since: u64,
@@ -553,6 +567,28 @@ impl<'a> Supervised<'a> {
         }
     }
 
+    /// Whether something that depends on this service may start.
+    ///
+    /// Serving, or never going to be: a service that has exited, given up, been held or was
+    /// never part of the run will not become healthy by being waited for, so its dependents
+    /// start and fail on their own terms rather than hanging on it.
+    fn settled(&self, now: u64) -> bool {
+        match (&self.phase, &self.check) {
+            (Phase::Pending | Phase::Waiting { .. }, _) => false,
+            (Phase::Running { .. }, None) => true,
+            (Phase::Running { since, .. }, Some(check)) => {
+                let timing = &check.resolved.timing;
+                let window = timing
+                    .start_period
+                    .as_millis()
+                    .saturating_add(timing.interval.as_millis().saturating_mul(u64::from(timing.retries)))
+                    .saturating_add(DEPENDENCY_SLACK.as_millis());
+                check.healthy == Some(true) || now.saturating_sub(*since) >= window
+            }
+            (Phase::Idle | Phase::Exited | Phase::GaveUp | Phase::Held, _) => true,
+        }
+    }
+
     /// Stops the service because somebody asked, and holds it. `false` when it could not be
     /// stopped — a pid we will not signal, a runtime we do not drive — in which case nothing has
     /// changed and the request is reported as rejected.
@@ -716,17 +752,26 @@ pub fn run_with(
     controls: &mut dyn FnMut() -> Vec<Result<Control, Rejection>>,
     on_event: &mut dyn FnMut(Event),
 ) -> Result<SuperviseOutcome, ServiceError> {
-    // `up` is the one that validates: an unknown `--only` name and a `depends_on` cycle both
-    // come back from here, before anything has been started.
-    let started = service::up(services, only, ctx, false)?;
-    let now = clock.now();
-    let mut watch: Vec<Supervised<'_>> = Vec::with_capacity(started.len());
-    for status in started {
-        let spec = &services[status.name.as_str()];
-        let mut service = Supervised::new(spec, ctx, status);
-        service.adopt(ctx, opts, now, on_event);
+    // An unknown `--only` name and a `depends_on` cycle both come back from here, before
+    // anything has been started.
+    let order = service::order(services, only)?;
+    let mut watch: Vec<Supervised<'_>> = Vec::with_capacity(order.len());
+    for name in order {
+        let spec = &services[name.as_str()];
+        let named = only.is_some_and(|set| set.contains(&name));
+        let mut service = Supervised::new(spec, ctx, ServiceStatus::new(&name, spec, RunState::Stopped));
+        if service::should_skip(spec, named) {
+            service.last = service.last.detail("autostart is false");
+        } else {
+            service.phase = Phase::Pending;
+        }
         watch.push(service);
     }
+    // The first pass is the one whose failures are the caller's: a service with no command or a
+    // health check that does not resolve is a config error, and `run` refuses to begin over it
+    // exactly as `up` would. Later starts are restarts, and a failed restart is one failed
+    // service, not a failed run.
+    start_ready(&mut watch, services, ctx, opts, clock.now(), on_event, true)?;
 
     while !should_stop() {
         let now = clock.now();
@@ -739,10 +784,50 @@ pub fn run_with(
         for service in &mut watch {
             service.tick(services, ctx, opts, now, on_event);
         }
+        start_ready(&mut watch, services, ctx, opts, now, on_event, false)?;
         clock.sleep(opts.poll);
     }
 
     finish(watch, services, only, ctx, opts, on_event)
+}
+
+/// Starts every pending service whose dependencies have settled, in dependency order.
+///
+/// `watch` is in dependency order already, so one pass starts a whole chain of services that
+/// have no health checks — which is every service, in the common case, and exactly what `up`
+/// did before dependencies were waited for.
+fn start_ready<'a>(
+    watch: &mut [Supervised<'a>],
+    services: &'a BTreeMap<String, ServiceSpec>,
+    ctx: &ServiceContext<'_>,
+    opts: &SuperviseOptions,
+    now: u64,
+    on_event: &mut dyn FnMut(Event),
+    strict: bool,
+) -> Result<(), ServiceError> {
+    for index in 0..watch.len() {
+        if !matches!(watch[index].phase, Phase::Pending) {
+            continue;
+        }
+        let ready = watch[index]
+            .spec
+            .depends_on
+            .iter()
+            // A dependency outside this run's selection is not ours to wait for.
+            .all(|dep| watch.iter().find(|other| &other.name == dep).is_none_or(|other| other.settled(now)));
+        if !ready {
+            continue;
+        }
+        if strict {
+            let only = BTreeSet::from([watch[index].name.clone()]);
+            for status in service::up(services, Some(&only), ctx, false)? {
+                watch[index].attach(status, ctx, opts, now, on_event);
+            }
+        } else {
+            watch[index].start(services, ctx, opts, now, on_event);
+        }
+    }
+    Ok(())
 }
 
 /// A request that never became a [`Control`]: the text as it arrived, and what was wrong with it.
@@ -804,8 +889,11 @@ fn finish(
 ) -> Result<SuperviseOutcome, ServiceError> {
     // A held service said `stopped` when it was stopped. Saying it again on the way out would
     // report something that did not happen twice.
-    let idle: BTreeSet<String> =
-        watch.iter().filter(|s| matches!(s.phase, Phase::Idle | Phase::Held)).map(|s| s.name.clone()).collect();
+    let idle: BTreeSet<String> = watch
+        .iter()
+        .filter(|s| matches!(s.phase, Phase::Idle | Phase::Held | Phase::Pending))
+        .map(|s| s.name.clone())
+        .collect();
     // `down` stops in reverse dependency order and reports in the order it stopped things, so
     // the events go out in the order they actually happened.
     // With `--only`, a service that joined by request is being watched too, and stopping the
@@ -2237,5 +2325,111 @@ web:
         );
         // The service that was running is still the one process it started as.
         assert_eq!(session.named(is_started), ["web"]);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Dependencies
+    // -----------------------------------------------------------------------------------
+
+    /// `web` depends on `db`, and `db` answers its health check with whatever `check` does.
+    fn web_behind_db(check: &str, retries: u32) -> BTreeMap<String, ServiceSpec> {
+        specs(&format!(
+            "\ndb:\n  run: \"sleep 30\"\n  health:\n    cmd: \"{check}\"\n    interval: 100ms\n    start_period: 0s\n    retries: {retries}\nweb:\n  run: \"sleep 30\"\n  depends_on: [db]\n"
+        ))
+    }
+
+    fn position(session: &Session, wanted: &Event) -> usize {
+        session.kinds().iter().position(|event| event == wanted).unwrap_or_else(|| panic!("{wanted:?} never happened"))
+    }
+
+    fn started_at(session: &Session, service: &str) -> u64 {
+        let found =
+            session.events.iter().find(|(_, event)| matches!(event, Event::Started { name, .. } if name == service));
+        found.unwrap_or_else(|| panic!("{service} never started")).0
+    }
+
+    #[test]
+    fn a_dependent_waits_until_its_dependency_is_serving() {
+        let harness = Harness::new();
+        let services = web_behind_db("test -f ready", 1000);
+        let polls_seen = Cell::new(0u32);
+
+        let session = direct(
+            &harness,
+            &services,
+            None,
+            &options(100),
+            |_| {
+                // Ten polls in, the dependency starts answering. Until then `web` must not exist.
+                polls_seen.set(polls_seen.get() + 1);
+                if polls_seen.get() == 10 {
+                    fs::write(harness.worktree.join("ready"), "").expect("ready");
+                }
+                Vec::new()
+            },
+            seen(is_started, 2, 2),
+        );
+
+        let healthy = position(&session, &Event::Healthy { name: "db".to_owned() });
+        let web = session.kinds().iter().position(|e| matches!(e, Event::Started { name, .. } if name == "web"));
+        assert!(web.is_some_and(|at| at > healthy), "web started before db was serving: {:?}", session.kinds());
+        assert!(started_at(&session, "web") >= 900, "web did not wait: {:?}", session.events);
+    }
+
+    #[test]
+    fn a_dependent_starts_anyway_once_the_dependency_has_had_its_whole_window() {
+        let harness = Harness::new();
+        // Never passes. The window is 0s + 2 × 100ms, and the slack on top is five seconds.
+        let services = web_behind_db("false", 2);
+
+        let session = direct(&harness, &services, None, &options(100), |_| Vec::new(), seen(is_started, 2, 2));
+
+        let at = started_at(&session, "web");
+        assert!((5200..5500).contains(&at), "web started at {at}ms, outside the window's end");
+        // The failing check is reported where it belongs, and is nobody's reason to stop.
+        assert_eq!(session.named(is_unhealthy), ["db"]);
+        assert_eq!(session.count(is_exited), 0);
+    }
+
+    #[test]
+    fn a_dependency_that_is_gone_does_not_strand_its_dependents() {
+        let harness = Harness::new();
+        let services =
+            specs("\ndb:\n  run: \"exit 1\"\n  restart: never\nweb:\n  run: \"sleep 30\"\n  depends_on: [db]\n");
+
+        let session = watch(&harness, &services, &options(100), seen(is_started, 1, 2));
+
+        assert_eq!(session.named(is_started), ["web"], "{:?}", session.kinds());
+    }
+
+    #[test]
+    fn a_dependent_that_never_started_is_not_reported_stopped() {
+        let harness = Harness::new();
+        let services = web_behind_db("false", 1000);
+
+        let session = watch(&harness, &services, &options(100), polls(10));
+
+        assert_eq!(session.named(is_started), ["db"]);
+        assert_eq!(session.named(is_stopped), ["db"], "web never ran, so it never stopped");
+        let web = session.outcome.services.iter().find(|s| s.name == "web").expect("web is in the outcome");
+        assert_eq!(web.state, RunState::Stopped);
+    }
+
+    #[test]
+    fn a_requested_start_does_not_wait_for_dependencies() {
+        let harness = Harness::new();
+        let services = web_behind_db("false", 1000);
+
+        let session = direct(
+            &harness,
+            &services,
+            None,
+            &options(100),
+            once_after(is_started, 1, "start web"),
+            seen(is_started, 2, 2),
+        );
+
+        // Somebody asked for it by name. That outranks a health check that has not passed yet.
+        assert!(started_at(&session, "web") < 1000, "{:?}", session.events);
     }
 }

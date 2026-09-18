@@ -355,6 +355,13 @@ terminal or a CI job wants a process to babysit. Conflating the two is what forc
   Without that, one broken command pins a core forever
 - `--no-restart` reports exits without acting on them
 
+**A dependent waits for its dependency to be serving.** A service whose `depends_on` names one
+with a `health:` block is not started until that check passes — which is what lets a web server
+read the token its API writes at boot. It does not wait forever: once the dependency has had its
+whole health window (`start_period` plus `retries` intervals) and five seconds more, the
+dependent starts anyway, and the failing check stays reported on the dependency. A dependency
+that has exited, given up or been stopped holds nobody up, and a `start` request never waits.
+
 **A failing health check is reported, never acted on.** A subtly wrong check — a `localhost`
 that resolves to `::1` first on macOS — would otherwise become an infinite kill loop against a
 service that is working perfectly.
