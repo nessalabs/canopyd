@@ -204,7 +204,14 @@ impl Canopy {
         // Only forks that are actually there: see `db::ready`.
         let project_root = self.project_path();
         let state = self.state_dir(branch);
-        let databases = db::ready(&db::DbContext { project_path: &project_root, state: &state })?;
+        let no_env = std::collections::BTreeMap::new();
+        let project_name = self.project_name();
+        let databases = db::ready(&db::DbContext {
+            project_path: &project_root,
+            project: &project_name,
+            state: &state,
+            env: &no_env,
+        })?;
         let default_config = config::CanopyConfig::empty();
         let config = self.config().and_then(|(_, parsed)| parsed.config.as_ref()).unwrap_or(&default_config);
         let name = worktree.file_name().unwrap_or(branch).to_owned();
@@ -252,14 +259,24 @@ impl Canopy {
         let (project, state) = (self.project_path(), self.state_dir(branch));
         let theirs = from.branch().map(|other| self.state_dir(other));
         let source = from.source(theirs.as_deref());
-        let ctx = db::DbContext { project_path: &project, state: &state };
+        let ctx = db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+        };
         Ok(db::fork(&self.declared_databases(), only, &ctx, &source)?)
     }
 
     /// The branch's recorded forks, as they stand on disk.
     pub fn db_list(&self, branch: &str) -> Result<Vec<db::DbInstance>> {
         let (project, state) = (self.project_path(), self.state_dir(branch));
-        Ok(db::list(&db::DbContext { project_path: &project, state: &state })?)
+        Ok(db::list(&db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+        })?)
     }
 
     /// Throws one fork away and makes it again.
@@ -267,14 +284,41 @@ impl Canopy {
         let (project, state) = (self.project_path(), self.state_dir(branch));
         let theirs = from.branch().map(|other| self.state_dir(other));
         let source = from.source(theirs.as_deref());
-        let ctx = db::DbContext { project_path: &project, state: &state };
+        let ctx = db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+        };
         Ok(db::reset(&self.declared_databases(), name, &ctx, &source)?)
+    }
+
+    /// Rebuilds the seed templates of the selected databases and returns their names. Only
+    /// server databases have one: SQLite's template is its seed file, read at fork time.
+    pub fn db_refresh_templates(
+        &self,
+        branch: &str,
+        only: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<Vec<String>> {
+        let (project, state) = (self.project_path(), self.state_dir(branch));
+        let ctx = db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+        };
+        Ok(db::refresh_templates(&self.declared_databases(), only, &ctx)?)
     }
 
     /// Removes the branch's forks, all of them or `only`, and returns the names that had one.
     pub fn db_drop(&self, branch: &str, only: Option<&std::collections::BTreeSet<String>>) -> Result<Vec<String>> {
         let (project, state) = (self.project_path(), self.state_dir(branch));
-        let ctx = db::DbContext { project_path: &project, state: &state };
+        let ctx = db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+        };
         Ok(db::drop_forks(&self.declared_databases(), only, &ctx)?)
     }
 

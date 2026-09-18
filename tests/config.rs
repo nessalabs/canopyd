@@ -338,10 +338,10 @@ fn a_database_may_have_exactly_one_seed_source() {
 }
 
 #[test]
-fn databases_warn_that_they_are_not_supported_yet() {
+fn a_database_adapter_that_cannot_be_driven_yet_warns_by_name() {
     warning_mentioning(
-        "version: 1\ndatabases:\n  main:\n    adapter: postgres\nservices:\n  a:\n    run: x\n",
-        "not supported by this version",
+        "version: 1\ndatabases:\n  main:\n    adapter: redis\nservices:\n  a:\n    run: x\n",
+        "adapter redis is not supported by this version",
     );
 }
 

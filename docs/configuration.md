@@ -57,7 +57,7 @@ that, and it may not match.
 | `env_file` | string or `false` | `.env.canopy` |
 | `worktree` | [worktree](#worktree) | see below |
 | `copy` | list of [rule](#copy) | `[]` |
-| `databases` | name → database | `{}` — see [Databases](#databases). `sqlite` is supported; the others warn |
+| `databases` | name → database | `{}` — see [Databases](#databases). `sqlite` and `postgres` are supported; the others warn |
 
 **Names** — for ports, services and databases — may contain lowercase letters, digits, `_` and
 `-`, and must start with a letter or digit. The rule is strict because a name has to be safe in
@@ -337,7 +337,7 @@ would be worse than a clear message.
 - a `localhost` health URL (the `::1` trap above)
 - a declared port no service references
 - no services at all
-- a database whose adapter this version cannot drive (`postgres`, `mysql`, `redis`)
+- a database whose adapter this version cannot drive (`mysql`, `redis`)
 
 ## Databases
 
@@ -355,16 +355,32 @@ databases:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `adapter` | required | `sqlite` today. `postgres`, `mysql` and `redis` parse, warn, and are refused by `db fork` |
+| `adapter` | required | `sqlite` or `postgres`. `mysql` and `redis` parse, warn, and are refused by `db fork` |
 | `source` | none | sqlite: the file each fork is copied from. Missing means forks start empty |
 | `env` | `<NAME>_URL` | the variable that receives the fork's URL |
-| `version`, `seed`, `runtime`, `options` | | for the server adapters; unused by `sqlite` |
+| `version` | `16` | postgres: the image tag, and which shared server a fork lives on |
+| `seed` | none | postgres: one of `dump:` (a `pg_dump -Fc` file or plain SQL), `sql:` or `command:` (migrations, run with `DATABASE_URL` set to the template) |
+| `options.extensions` | none | postgres: comma-separated, `CREATE EXTENSION IF NOT EXISTS` in the template |
+| `runtime` | | for `redis`; unused so far |
 
 Once a fork exists its URL is in the worktree's environment three ways: under `env`, as
 `CANOPY_DB_<NAME>_URL`, and as `${db.<name>.url}` for anything in this file. It is layered
 **after** `env:`, so a `DATABASE_URL` the file sets for people running without canopyd is
 replaced by the fork's, and **before** a caller's `--env`, which wins. A fork that has gone
 missing from disk is left out entirely, so nothing is pointed at a database that is not there.
+
+### Postgres
+
+Needs docker, and nothing else: the server brings `psql` and `pg_restore` with it. There is
+**one server per version** — a `canopy-pg-16` container on `127.0.0.1:54316`, user and password
+`canopy` — and one database per worktree on it. The project's seed is loaded once into a
+template database, `tpl_<project>_<name>`, and every fork is `CREATE DATABASE … TEMPLATE …`,
+which Postgres does as a file copy: a multi-gigabyte seed forks in seconds.
+
+`${db.<name>.host}`, `.port`, `.database`, `.user`, `.password` and `.container` are there for a
+driver that wants parts rather than a URL. `canopyd db template` rebuilds the template after the
+seed changes; existing forks keep their data. The server and its templates are shared with the
+Canopy app, which uses the same names, so a machine with both has one server and not two.
 
 ## A complete example
 

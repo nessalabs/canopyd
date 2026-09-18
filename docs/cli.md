@@ -440,7 +440,12 @@ main             sqlite   ready    file:/…/state/feat-login/db/main.db
   worktree's fork
 - `db ls [<branch>]` lists forks, re-checked against the disk: one whose file is gone is `missing`
 - `db reset <name> [<branch>]` throws a fork away and makes it again; takes `--from` too
-- `db drop [<branch>]` removes forks, all or `--only`. `rm` does this for the whole worktree
+- `db template [<branch>]` rebuilds seed templates from their seeds, all or `--only`. Forks that
+  exist keep their data; the next one is made from the new template. SQLite has none to rebuild
+- `db drop [<branch>]` removes forks, all or `--only`. `rm` does this for the whole worktree,
+  including dropping a fork that lives on a server
+- `db reset` checks that a new fork *can* be made before it drops the old one, so docker being
+  off costs you nothing
 
 An adapter this version cannot drive is an error (`db_unsupported`) for the **whole** call, and
 nothing is forked: half a set of forks leaves a worktree pointed at a shared database without

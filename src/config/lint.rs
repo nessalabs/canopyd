@@ -378,8 +378,7 @@ pub fn lint(config: &CanopyConfig) -> Vec<Diagnostic> {
         let where_ = format!("databases.{name}");
         // `db fork` refuses the whole set over one of these, so the warning is the early notice.
         let unsupported = match db.adapter {
-            DbAdapter::Sqlite => None,
-            DbAdapter::Postgres => Some("postgres"),
+            DbAdapter::Sqlite | DbAdapter::Postgres => None,
             DbAdapter::Mysql => Some("mysql"),
             DbAdapter::Redis => Some("redis"),
         };

@@ -29,6 +29,7 @@ const ENVELOPE_COMMANDS: &[(&[&str], &str)] = &[
     (&["db", "fork", "feat/x"], "db fork"),
     (&["db", "ls", "feat/x"], "db ls"),
     (&["db", "reset", "main", "feat/x"], "db reset"),
+    (&["db", "template", "feat/x"], "db template"),
     (&["db", "drop", "feat/x"], "db drop"),
     (&["new", "feat/new-one"], "new"),
     (&["rm", "feat/x"], "rm"),

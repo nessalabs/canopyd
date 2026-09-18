@@ -30,6 +30,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::{DatabaseSpec, DbAdapter};
 use crate::error::ErrorCode;
 
+mod postgres;
+
 /// The record of what was forked, inside a worktree's state directory.
 const REGISTRY: &str = "databases.json";
 
@@ -56,6 +58,11 @@ pub enum DbError {
     },
     #[error("{path} is not a readable fork record: {detail}")]
     Registry { path: Utf8PathBuf, detail: String },
+    /// The engine, or docker on its behalf, said no. `detail` is what it said.
+    #[error("database {name}: {detail}")]
+    Engine { name: String, detail: String },
+    #[error("{0:?} is not a name that can be used for a database")]
+    Identifier(String),
 }
 
 impl DbError {
@@ -63,7 +70,10 @@ impl DbError {
         match self {
             DbError::Unknown(_) => ErrorCode::ConfigInvalid,
             DbError::Unsupported { .. } => ErrorCode::DbUnsupported,
-            DbError::NoSourceFork { .. } | DbError::Registry { .. } => ErrorCode::DbFailed,
+            DbError::NoSourceFork { .. }
+            | DbError::Registry { .. }
+            | DbError::Engine { .. }
+            | DbError::Identifier(_) => ErrorCode::DbFailed,
             DbError::Io { .. } => ErrorCode::Io,
         }
     }
@@ -83,7 +93,7 @@ pub enum ForkSource<'a> {
 }
 
 impl ForkSource<'_> {
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             ForkSource::Template => "seed template".to_owned(),
             ForkSource::Empty => "empty".to_owned(),
@@ -98,8 +108,13 @@ pub struct DbContext<'a> {
     /// The primary checkout. Seed files are named relative to it, so every worktree forks the
     /// same seed whatever its own checkout has done to the file.
     pub project_path: &'a Utf8Path,
+    /// What the project is called. A server's template is shared by every worktree of a project
+    /// and named after it.
+    pub project: &'a str,
     /// This worktree's state directory.
     pub state: &'a Utf8Path,
+    /// The worktree's resolved environment, for a seed `command:`.
+    pub env: &'a BTreeMap<String, String>,
 }
 
 /// Whether a recorded fork is still there.
@@ -205,8 +220,7 @@ fn selection<'a>(
 /// any of them is touched, so a config with one unsupported entry forks nothing rather than half.
 fn supported(name: &str, spec: &DatabaseSpec) -> Result<(), DbError> {
     let adapter = match spec.adapter {
-        DbAdapter::Sqlite => return Ok(()),
-        DbAdapter::Postgres => "postgres",
+        DbAdapter::Sqlite | DbAdapter::Postgres => return Ok(()),
         DbAdapter::Mysql => "mysql",
         DbAdapter::Redis => "redis",
     };
@@ -230,10 +244,15 @@ pub fn fork(
     let mut recorded = read_registry(ctx.state)?;
     let mut out = Vec::with_capacity(chosen.len());
     for (name, spec) in chosen {
-        let existing = recorded.iter().find(|instance| &instance.name == name).map(|instance| observe(instance, ctx));
+        let existing =
+            recorded.iter().find(|instance| &instance.name == name).map(|instance| observe(instance, ctx, true));
         let instance = match existing {
             Some(instance) if instance.status == ForkStatus::Ready => instance,
-            _ => sqlite_fork(name, spec, ctx, source)?,
+            _ => match spec.adapter {
+                DbAdapter::Postgres => postgres::fork(name, spec, ctx, source)?,
+                // `supported` has already refused the rest.
+                DbAdapter::Sqlite | DbAdapter::Mysql | DbAdapter::Redis => sqlite_fork(name, spec, ctx, source)?,
+            },
         };
         recorded.retain(|other| other.name != instance.name);
         recorded.push(instance.clone());
@@ -246,7 +265,25 @@ pub fn fork(
 
 /// Every recorded fork, re-checked against the disk rather than trusted from the record.
 pub fn list(ctx: &DbContext<'_>) -> Result<Vec<DbInstance>, DbError> {
-    Ok(read_registry(ctx.state)?.iter().map(|instance| observe(instance, ctx)).collect())
+    Ok(read_registry(ctx.state)?.iter().map(|instance| observe(instance, ctx, true)).collect())
+}
+
+/// Rebuilds the seed template of every selected database that has one, and returns what was
+/// rebuilt. Forks that exist are untouched; the next one made from the template is new.
+///
+/// SQLite has nothing to rebuild: its template *is* the seed file, read at fork time.
+pub fn refresh_templates(
+    databases: &BTreeMap<String, DatabaseSpec>,
+    only: Option<&BTreeSet<String>>,
+    ctx: &DbContext<'_>,
+) -> Result<Vec<String>, DbError> {
+    let mut rebuilt = Vec::new();
+    for (name, spec) in selection(databases, only)? {
+        if spec.adapter == DbAdapter::Postgres {
+            rebuilt.push(postgres::refresh_template(name, spec, ctx)?);
+        }
+    }
+    Ok(rebuilt)
 }
 
 /// Throws a fork away and makes it again from `source`.
@@ -257,6 +294,14 @@ pub fn reset(
     source: &ForkSource<'_>,
 ) -> Result<DbInstance, DbError> {
     let only = BTreeSet::from([name.to_owned()]);
+    // Everything that can be known to fail is asked first. Dropping the fork and *then* finding
+    // docker is off leaves a worktree with no database where it had a working one.
+    for (name, spec) in selection(databases, Some(&only))? {
+        supported(name, spec)?;
+        if spec.adapter == DbAdapter::Postgres {
+            postgres::preflight(name, ctx)?;
+        }
+    }
     drop_forks(databases, Some(&only), ctx)?;
     let mut forked = fork(databases, Some(&only), ctx, source)?;
     // Asked for one declared database by name, so one instance comes back.
@@ -277,19 +322,44 @@ pub fn drop_forks(
     let (going, staying): (Vec<DbInstance>, Vec<DbInstance>) =
         recorded.into_iter().partition(|instance| only.is_none_or(|names| names.contains(&instance.name)));
     for instance in &going {
-        sqlite_remove(&fork_file(ctx.state, &instance.name))?;
+        match instance.adapter {
+            DbAdapter::Postgres => postgres::remove(instance, ctx)?,
+            DbAdapter::Sqlite | DbAdapter::Mysql | DbAdapter::Redis => {
+                sqlite_remove(&fork_file(ctx.state, &instance.name))?;
+            }
+        }
     }
     write_registry(ctx.state, &staying)?;
     Ok(going.into_iter().map(|instance| instance.name).collect())
 }
 
 /// The forks a worktree's environment may point at: recorded *and* present.
+///
+/// "Present" is checked where checking is a `stat`. A server fork is taken at its record's word
+/// here: this runs for every command that resolves an environment, and asking docker each time
+/// would put a process spawn in front of `canopyd env`. `db ls` is the one that asks.
 pub fn ready(ctx: &DbContext<'_>) -> Result<Vec<DbInstance>, DbError> {
-    Ok(list(ctx)?.into_iter().filter(|instance| instance.status == ForkStatus::Ready).collect())
+    let recorded = read_registry(ctx.state)?;
+    Ok(recorded
+        .iter()
+        .map(|instance| observe(instance, ctx, false))
+        .filter(|instance| instance.status == ForkStatus::Ready)
+        .collect())
 }
 
-/// A record, corrected for what is actually on disk.
-fn observe(instance: &DbInstance, ctx: &DbContext<'_>) -> DbInstance {
+/// A record, corrected for what is actually there. `probe` allows the expensive question.
+fn observe(instance: &DbInstance, ctx: &DbContext<'_>, probe: bool) -> DbInstance {
+    if instance.adapter == DbAdapter::Postgres {
+        if !probe {
+            return DbInstance { status: ForkStatus::Ready, ..instance.clone() };
+        }
+        let size = postgres::size(instance, ctx);
+        return DbInstance {
+            status: if size.is_some() { ForkStatus::Ready } else { ForkStatus::Missing },
+            size_bytes: size,
+            ..instance.clone()
+        };
+    }
     let size = file_size(&fork_file(ctx.state, &instance.name));
     DbInstance {
         status: if size.is_some() { ForkStatus::Ready } else { ForkStatus::Missing },
@@ -387,6 +457,8 @@ mod tests {
 
     use super::*;
 
+    static NO_ENV: BTreeMap<String, String> = BTreeMap::new();
+
     struct Harness {
         _dir: TempDir,
         project: Utf8PathBuf,
@@ -404,11 +476,11 @@ mod tests {
         }
 
         fn ctx(&self) -> DbContext<'_> {
-            DbContext { project_path: &self.project, state: &self.state }
+            DbContext { project_path: &self.project, project: "demo", state: &self.state, env: &NO_ENV }
         }
 
         fn other(&self) -> DbContext<'_> {
-            DbContext { project_path: &self.project, state: &self.other_state }
+            DbContext { project_path: &self.project, project: "demo", state: &self.other_state, env: &NO_ENV }
         }
 
         fn seed(&self, relative: &str, bytes: &[u8]) {
@@ -593,7 +665,6 @@ mod tests {
     }
 
     #[rstest]
-    #[case("postgres")]
     #[case("mysql")]
     #[case("redis")]
     fn an_adapter_this_version_cannot_drive_forks_nothing_at_all(#[case] adapter: &str) {

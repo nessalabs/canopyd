@@ -195,13 +195,13 @@ fn removing_a_worktree_takes_its_forks_with_it() {
 fn an_adapter_this_version_cannot_drive_is_refused_and_warned_about() {
     let fx = Fixture::new();
     fx.commit(
-        &[("canopy.yaml", "version: 1\ndatabases:\n  main:\n    adapter: postgres\n  local:\n    adapter: sqlite\n")],
+        &[("canopy.yaml", "version: 1\ndatabases:\n  main:\n    adapter: redis\n  local:\n    adapter: sqlite\n")],
         "config",
     );
 
     let out = fx.cwt().args(["db", "fork", "main", "--json"]).output().unwrap();
     let envelope = err_envelope(&out.stdout, "db_unsupported");
-    assert!(envelope["error"]["message"].as_str().unwrap().contains("adapter postgres"), "{envelope}");
+    assert!(envelope["error"]["message"].as_str().unwrap().contains("adapter redis"), "{envelope}");
     assert_eq!(
         run(&fx, &["db", "ls", "main"]),
         serde_json::json!([]),
@@ -218,7 +218,7 @@ fn an_adapter_this_version_cannot_drive_is_refused_and_warned_about() {
         .collect();
     let paths: Vec<&str> = diagnostics.iter().map(|d| d["path"].as_str().unwrap()).collect();
     assert_eq!(paths, ["databases.main"], "sqlite is supported and says nothing: {diagnostics:?}");
-    assert!(diagnostics[0]["message"].as_str().unwrap().contains("adapter postgres is not supported"));
+    assert!(diagnostics[0]["message"].as_str().unwrap().contains("adapter redis is not supported"));
 }
 
 #[test]

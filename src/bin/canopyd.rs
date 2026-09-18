@@ -262,6 +262,13 @@ enum DbCommand {
         #[arg(long, default_value = "template")]
         from: String,
     },
+    /// Rebuild seed templates from their seeds. Existing forks are untouched.
+    Template {
+        branch: Option<String>,
+        /// Rebuild only these. Repeatable.
+        #[arg(long)]
+        only: Vec<String>,
+    },
     /// Remove the worktree's forks.
     Drop {
         branch: Option<String>,
@@ -350,6 +357,7 @@ impl Command {
             Command::Db(DbCommand::Fork { .. }) => "db fork",
             Command::Db(DbCommand::Ls { .. }) => "db ls",
             Command::Db(DbCommand::Reset { .. }) => "db reset",
+            Command::Db(DbCommand::Template { .. }) => "db template",
             Command::Db(DbCommand::Drop { .. }) => "db drop",
             Command::Hook(HookCommand::Install) => "hook install",
             Command::Hook(HookCommand::Uninstall) => "hook uninstall",
@@ -838,6 +846,20 @@ fn run(cli: &Cli) -> Result<u8> {
             }
         }
 
+        Command::Db(DbCommand::Template { ref branch, ref only }) => {
+            let branch = resolve_branch(&canopy, branch.as_deref())?;
+            let rebuilt = canopy.db_refresh_templates(&branch, selection(only).as_ref())?;
+            if cli.json {
+                emit("db template", &serde_json::json!({ "rebuilt": rebuilt }));
+            } else if rebuilt.is_empty() {
+                println!("no templates to rebuild");
+            } else {
+                for name in &rebuilt {
+                    println!("rebuilt {name}");
+                }
+            }
+        }
+
         Command::Db(DbCommand::Drop { ref branch, ref only }) => {
             let branch = resolve_branch(&canopy, branch.as_deref())?;
             let dropped = canopy.db_drop(&branch, selection(only).as_ref())?;
@@ -914,6 +936,11 @@ fn run(cli: &Cli) -> Result<u8> {
             // that no longer exist and slowly exhausts the range.
             let released =
                 outcome.branch.as_deref().map(|branch| canopy.release_ports(branch)).transpose()?.unwrap_or(0);
+            // A file-backed fork goes with the state directory below. One on a server does not:
+            // it has to be dropped while the record that names it still exists. Best effort, like
+            // everything after the checkout is gone — there is no worktree left to fail for.
+            let dropped =
+                outcome.branch.as_deref().and_then(|branch| canopy.db_drop(branch, None).ok()).unwrap_or_default();
             let state = outcome.branch.as_deref().map(|branch| canopy.state_dir(branch));
             if let Some(state) = state.filter(|path| path.exists()) {
                 // The records and logs describe a worktree that is gone.
@@ -928,6 +955,7 @@ fn run(cli: &Cli) -> Result<u8> {
                         "branch_deleted": outcome.branch_deleted,
                         "ports_released": released,
                         "services_stopped": stopped,
+                        "databases_dropped": dropped,
                     }),
                 );
             } else {

@@ -122,7 +122,12 @@ impl Fixture {
             .env("GIT_COMMITTER_NAME", "Fixture")
             .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
             .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00+0000")
-            .env("TZ", "UTC");
+            .env("TZ", "UTC")
+            // No test reaches a real docker. A database or a service that needs one gets a
+            // stand-in by setting this itself; anything else finds nothing here, which is the
+            // same "docker is not available" a machine without docker gives. A suite that
+            // started containers on the machine it ran on did exactly that once.
+            .env("CANOPYD_DOCKER", "/nonexistent/docker-is-not-for-tests");
     }
 }
 

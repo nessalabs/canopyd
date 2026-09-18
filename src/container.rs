@@ -75,10 +75,16 @@ fn sanitize(text: &str) -> String {
     cleaned.trim_start_matches(|ch: char| !ch.is_ascii_alphanumeric()).to_owned()
 }
 
-/// Eight hex characters of the worktree's path: what makes two worktrees' `web` containers two
-/// containers. The path, not the branch, because it is what `git worktree list` keys on too.
+/// Eight hex characters of a hash that does not change between versions of this tool, for
+/// names that have to be found again later: a container, a database fork.
+pub fn short_hash(text: &str) -> String {
+    format!("{:016x}", fnv1a(text.as_bytes()))[..8].to_owned()
+}
+
+/// What makes two worktrees' `web` containers two containers. The path, not the branch,
+/// because it is what `git worktree list` keys on too.
 fn worktree_id(worktree: &Utf8Path) -> String {
-    format!("{:016x}", fnv1a(worktree.as_str().as_bytes()))[..8].to_owned()
+    short_hash(worktree.as_str())
 }
 
 /// The one place container names are built. Start, stop and the backstop all have to agree.
@@ -239,6 +245,11 @@ pub fn exec_line(docker: &str, args: &[String]) -> String {
 #[derive(Debug)]
 pub struct Finished {
     pub ok: bool,
+    /// The exit code, when there was one: a process killed by a signal has none.
+    pub code: Option<i32>,
+    /// What it printed on stdout alone — the part that is an answer rather than commentary.
+    pub stdout: String,
+    /// stdout then stderr, for showing a person what went wrong.
     pub output: String,
 }
 
@@ -249,11 +260,17 @@ pub fn call(docker: &str, args: &[String], cwd: &Utf8Path) -> Finished {
     let result = Command::new(docker).args(args).current_dir(cwd).stdin(Stdio::null()).output();
     match result {
         Ok(out) => {
-            let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let mut output = stdout.clone();
             output.push_str(&String::from_utf8_lossy(&out.stderr));
-            Finished { ok: out.status.success(), output }
+            Finished { ok: out.status.success(), code: out.status.code(), stdout, output }
         }
-        Err(error) => Finished { ok: false, output: format!("could not run {docker}: {error}") },
+        Err(error) => Finished {
+            ok: false,
+            code: None,
+            stdout: String::new(),
+            output: format!("could not run {docker}: {error}"),
+        },
     }
 }
 
