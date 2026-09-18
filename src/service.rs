@@ -21,9 +21,10 @@
 //!   it. [`ALIVE_GRACE`] is the fraction of a second `up` spends watching the process breathe
 //!   before it dares call it running — reporting `running` for something that has already exited
 //!   sends the user off to debug the wrong half of their stack.
-//! - **Only `runtime: host` works here.** `docker` and `compose` are reported
-//!   [`RunState::Unsupported`], loudly. Silently skipping them would leave a user staring at a
-//!   green `up` and a database that was never started.
+//! - **A container is a process.** `runtime: docker` and `compose` run the `docker` CLI attached,
+//!   so everything in this module — the record, the log, the grace, the group kill — applies to
+//!   them unchanged. What differs is the command line and a backstop `rm -f`: see
+//!   [`crate::container`].
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -33,7 +34,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 
-use crate::config::{Duration, Runtime, ServiceSpec, service_ports, start_order};
+use crate::config::{DockerSpec, Duration, Runtime, ServiceSpec, service_ports, start_order};
+use crate::container;
 use crate::env::{EnvTable, Facts, interpolate};
 use crate::error::ErrorCode;
 use crate::health::{self, HealthError, ResolvedHealth, Verdict};
@@ -158,8 +160,6 @@ pub enum RunState {
     Exited,
     /// We could not start it, could not stop it, or cannot read its record.
     Failed,
-    /// `runtime: docker` or `compose`. Reported rather than skipped.
-    Unsupported,
 }
 
 /// Everything one service's row shows.
@@ -285,15 +285,9 @@ fn start_one(
     ctx: &ServiceContext<'_>,
     wait: bool,
 ) -> Result<ServiceStatus, ServiceError> {
-    if let Some(detail) = unsupported(spec) {
-        return Ok(ServiceStatus::new(name, spec, RunState::Unsupported).detail(detail));
-    }
     if let Some(record) = live_record(ctx.state, name) {
         return Ok(running_status(name, spec, ctx, &record, record.pid));
     }
-    let Some(run) = &spec.run else {
-        return Err(ServiceError::NoCommand { name: name.to_owned() });
-    };
     // Resolved before the spawn, so a `health:` block that cannot be resolved is a config error
     // and not a process we started and then could not check.
     let health = match &spec.health {
@@ -301,10 +295,17 @@ fn start_one(
         None => None,
     };
 
-    let command = interpolate(run, ctx.facts, ctx.env);
     let cwd = service_cwd(spec, ctx);
     let env = service_env(spec, ctx);
     let log = log_path(ctx.state, name);
+    let command = match launch_line(name, spec, ctx, &env, &log)? {
+        Ok(command) => command,
+        // Docker said no, or is not there: a service that could not be started, with the reason,
+        // and not a failed `up` — the host services beside it have nothing to do with it.
+        Err(detail) => return Ok(ServiceStatus::new(name, spec, RunState::Failed).detail(detail)),
+    };
+    // A container's working directory is `-w`, inside it. The CLI itself runs in the worktree.
+    let cwd = if effective_runtime(spec) == Runtime::Host { cwd } else { ctx.worktree.to_owned() };
     let record = match proc::spawn(&SpawnRequest { command: &command, cwd: &cwd, env: &env, log: &log }) {
         Ok(record) => record,
         Err(error) => return Ok(ServiceStatus::new(name, spec, RunState::Failed).detail(error.to_string())),
@@ -380,11 +381,10 @@ pub fn down(
 }
 
 fn stop_one(name: &str, spec: &ServiceSpec, ctx: &ServiceContext<'_>) -> ServiceStatus {
-    if let Some(detail) = unsupported(spec) {
-        return ServiceStatus::new(name, spec, RunState::Unsupported).detail(detail);
-    }
     let path = record_path(ctx.state, name);
     if !path.exists() {
+        // No record, but a run that was killed outright may have left its container behind.
+        release_container(name, spec, ctx, false);
         return ServiceStatus::new(name, spec, RunState::Stopped);
     }
     let record = match proc::read_record(&path) {
@@ -402,6 +402,7 @@ fn stop_one(name: &str, spec: &ServiceSpec, ctx: &ServiceContext<'_>) -> Service
     // Removed only now that the process is gone. The other order leaves a live process with
     // nothing on disk pointing at it — unkillable by us and invisible to the next `status`.
     let _ = fs::remove_file(&path);
+    release_container(name, spec, ctx, false);
     let status = ServiceStatus::new(name, spec, RunState::Stopped);
     match outcome {
         StopOutcome::Killed => status.detail(format!("it ignored {} and was killed", spec.stop_signal)),
@@ -429,9 +430,6 @@ pub fn status(
 }
 
 fn observe(name: &str, spec: &ServiceSpec, ctx: &ServiceContext<'_>) -> ServiceStatus {
-    if let Some(detail) = unsupported(spec) {
-        return ServiceStatus::new(name, spec, RunState::Unsupported).detail(detail);
-    }
     let path = record_path(ctx.state, name);
     if !path.exists() {
         return ServiceStatus::new(name, spec, RunState::Stopped);
@@ -807,14 +805,154 @@ fn effective_runtime(spec: &ServiceSpec) -> Runtime {
     spec.runtime.unwrap_or(Runtime::Host)
 }
 
-/// `Some(reason)` for a service this version cannot touch.
-fn unsupported(spec: &ServiceSpec) -> Option<String> {
-    let label = match effective_runtime(spec) {
-        Runtime::Host => return None,
-        Runtime::Docker => "docker",
-        Runtime::Compose => "compose",
+/// The shell line that starts `name`, or `Err(why)` when it cannot be started at all.
+///
+/// For a host service that is `run:`. For a container it is the attached `docker` command, and
+/// getting there has side effects: the network is made, a leftover container is cleared, an
+/// image is built. The outer `Result` is for what `up` treats as its own failure — a service with
+/// no command, a log that will not open.
+fn launch_line(
+    name: &str,
+    spec: &ServiceSpec,
+    ctx: &ServiceContext<'_>,
+    env: &BTreeMap<String, String>,
+    log: &Utf8Path,
+) -> Result<Result<String, String>, ServiceError> {
+    let docker = container::docker_bin();
+    if effective_runtime(spec) == Runtime::Compose {
+        return Ok(compose_line(name, spec, ctx, env, &docker));
+    }
+    // Lint says the same, earlier and with a path. This is for a caller that never linted.
+    let run = spec.run.as_ref().ok_or_else(|| ServiceError::NoCommand { name: name.to_owned() })?;
+    let run = interpolate(run, ctx.facts, ctx.env);
+    match effective_runtime(spec) {
+        Runtime::Docker => Ok(docker_line(name, spec, ctx, env, log, &docker, &run)),
+        Runtime::Host | Runtime::Compose => Ok(Ok(run)),
+    }
+}
+
+fn docker_line(
+    name: &str,
+    spec: &ServiceSpec,
+    ctx: &ServiceContext<'_>,
+    env: &BTreeMap<String, String>,
+    log: &Utf8Path,
+    docker: &str,
+    command: &str,
+) -> Result<String, String> {
+    let needs = || "runtime docker needs `docker.image` or `docker.dockerfile`".to_owned();
+    let settings = spec.docker.as_ref().ok_or_else(needs)?;
+    container::available(docker, ctx.worktree)?;
+    container::ensure_network(docker, ctx.worktree)?;
+    let container_name = container::container_name(ctx.worktree, name);
+    container::remove_container(docker, &container_name, ctx.worktree);
+    let image = match (&settings.image, &settings.dockerfile) {
+        (Some(image), _) => image.clone(),
+        (None, Some(dockerfile)) => build_image(name, settings, dockerfile, ctx, log, docker)?,
+        (None, None) => return Err(needs()),
     };
-    Some(format!("runtime {label} is not supported in this version — host services only"))
+    let ports: Vec<u16> = service_ports(spec).iter().filter_map(|port| ctx.facts.ports.get(port).copied()).collect();
+    let plan = container::RunPlan {
+        name: &container_name,
+        image: &image,
+        service: name,
+        worktree: ctx.worktree,
+        cwd: spec.cwd.as_deref(),
+        docker: settings,
+        env,
+        ports: &ports,
+        command,
+    };
+    Ok(container::exec_line(docker, &container::run_args(&plan)))
+}
+
+/// Builds the image for a Dockerfile-backed service unless that exact Dockerfile is built
+/// already. The build's output goes into the service's own log: it is the first thing anyone
+/// wants to read when a service with a Dockerfile will not start.
+fn build_image(
+    name: &str,
+    settings: &DockerSpec,
+    dockerfile: &str,
+    ctx: &ServiceContext<'_>,
+    log: &Utf8Path,
+    docker: &str,
+) -> Result<String, String> {
+    let path = ctx.worktree.join(dockerfile);
+    let contents = fs::read(&path).map_err(|error| format!("{dockerfile}: {error}"))?;
+    let tag = container::image_tag(ctx.facts.project, name, &contents);
+    if container::image_exists(docker, &tag, ctx.worktree) {
+        return Ok(tag);
+    }
+    let context = ctx.worktree.join(settings.context.as_deref().unwrap_or("."));
+    let built = container::call(docker, &container::build_args(&path, &tag, &context), ctx.worktree);
+    // Best effort: a log that will not open must not turn a good build into a failed start.
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log) {
+        use std::io::Write as _;
+        let _ = file.write_all(built.output.as_bytes());
+    }
+    if built.ok { Ok(tag) } else { Err(format!("docker build failed: {}", container::last_line(&built.output))) }
+}
+
+fn compose_env_path(state: &Utf8Path, name: &str) -> Utf8PathBuf {
+    state.join(format!("compose-{name}.env"))
+}
+
+fn compose_line(
+    name: &str,
+    spec: &ServiceSpec,
+    ctx: &ServiceContext<'_>,
+    env: &BTreeMap<String, String>,
+    docker: &str,
+) -> Result<String, String> {
+    // `effective_runtime` says compose only when this is set.
+    let settings = spec.compose.as_ref().ok_or_else(|| "runtime compose needs a `compose:` block".to_owned())?;
+    container::available(docker, ctx.worktree)?;
+    // `${VAR}` in a compose file reads this, so the stack sees this worktree's ports and not
+    // whatever the developer's shell happens to export.
+    let env_file = compose_env_path(ctx.state, name);
+    fs::write(&env_file, container::compose_env_file(env)).map_err(|error| format!("{env_file}: {error}"))?;
+    let project = container::compose_project(ctx.worktree, name);
+    let file = ctx.worktree.join(&settings.file);
+    Ok(container::exec_line(docker, &container::compose_up_args(&project, &file, settings, &env_file)))
+}
+
+/// What is left of a container service once its CLI is gone.
+///
+/// Normally nothing: `--rm` removed the container, and compose stopped its stack on SIGTERM. This
+/// is for the time it did not — the CLI was killed at `stop_timeout`, or by something else — and
+/// it runs on every stop because finding out whether it is needed costs the same as doing it.
+/// `purge` is for a worktree that is going away: a compose stack's volumes and networks go too,
+/// or the next worktree on that path inherits its data.
+fn release_container(name: &str, spec: &ServiceSpec, ctx: &ServiceContext<'_>, purge: bool) {
+    let docker = container::docker_bin();
+    match (effective_runtime(spec), &spec.compose) {
+        // No `docker:` block means nothing could ever have been started for it.
+        (Runtime::Docker, _) if spec.docker.is_some() => {
+            container::remove_container(&docker, &container::container_name(ctx.worktree, name), ctx.worktree);
+        }
+        (Runtime::Compose, Some(settings)) => {
+            let project = container::compose_project(ctx.worktree, name);
+            let file = ctx.worktree.join(&settings.file);
+            let env_file = compose_env_path(ctx.state, name);
+            let timeout = (spec.stop_timeout.as_millis() / 1000).max(1).to_string();
+            let rest: Vec<&str> =
+                if purge { vec!["down", "-v", "--remove-orphans"] } else { vec!["stop", "-t", &timeout] };
+            let _ = container::call(
+                &docker,
+                &container::compose_args(&project, &file, settings, &env_file, &rest),
+                ctx.worktree,
+            );
+        }
+        (Runtime::Host | Runtime::Docker | Runtime::Compose, _) => {}
+    }
+}
+
+/// Removes what container services leave behind for good. Called when the worktree itself is
+/// being removed, after [`down`].
+pub fn purge(services: &BTreeMap<String, ServiceSpec>, ctx: &ServiceContext<'_>) {
+    for (name, spec) in services {
+        release_container(name, spec, ctx, true);
+    }
 }
 
 /// The record for `name`, but only while the process it names is still the one we started.
@@ -1482,25 +1620,21 @@ web:
         assert!(!harness.has_record("web"), "resolved before the spawn, so nothing was started");
     }
 
-    #[rstest]
-    #[case("\ndb:\n  runtime: docker\n  run: \"sleep 30\"\n", "docker")]
-    #[case("\ndb:\n  compose:\n    file: docker-compose.yml\n", "compose")]
-    fn a_docker_runtime_service_is_reported_unsupported_not_silently_skipped(#[case] yaml: &str, #[case] label: &str) {
+    #[test]
+    fn a_docker_service_with_no_image_is_failed_with_the_reason_and_nothing_is_started() {
+        // Everything past this point talks to docker, and is tested through the CLI with a
+        // stand-in for it: see tests/container_cli.rs. This is the one refusal that happens first.
         let harness = Harness::new();
         let facts = harness.facts();
         let ctx = harness.ctx(&facts);
-        let services = specs(yaml);
+        let services = specs("\ndb:\n  runtime: docker\n  run: \"sleep 30\"\n");
 
-        for statuses in [
-            up(&services, None, &ctx, false).expect("up"),
-            status(&services, None, &ctx).expect("status"),
-            down(&services, None, &ctx).expect("down"),
-        ] {
-            assert_eq!(statuses[0].state, RunState::Unsupported);
-            let detail = statuses[0].detail.as_deref().expect("a reason");
-            assert!(detail.contains(label) && detail.contains("not supported"), "{detail}");
-        }
+        let started = up(&services, None, &ctx, false).expect("up");
+        assert_eq!(started[0].state, RunState::Failed);
+        assert_eq!(started[0].detail.as_deref(), Some("runtime docker needs `docker.image` or `docker.dockerfile`"));
         assert!(!harness.has_record("db"));
+        assert_eq!(status(&services, None, &ctx).expect("status")[0].state, RunState::Stopped);
+        assert_eq!(down(&services, None, &ctx).expect("down")[0].state, RunState::Stopped);
     }
 
     // -----------------------------------------------------------------------------------

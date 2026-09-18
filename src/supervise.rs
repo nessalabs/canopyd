@@ -393,7 +393,7 @@ fn observe_exit(record: &ProcessRecord) -> Option<Exit> {
 /// Where one service is between two polls.
 #[derive(Debug)]
 enum Phase {
-    /// Not supervised: an unsupported runtime, `autostart: false`, or a record we cannot read.
+    /// Not supervised: `autostart: false`, or a record we cannot read.
     Idle,
     /// Not started yet: something it depends on is not serving.
     Pending,
@@ -506,7 +506,7 @@ impl<'a> Supervised<'a> {
                 on_event(Event::Exited { name: self.name.clone(), status: Exit::Unknown });
                 self.decide(Exit::Unknown, now, Duration::ZERO, opts, on_event)
             }
-            RunState::Stopped | RunState::Unsupported => Phase::Idle,
+            RunState::Stopped => Phase::Idle,
         };
     }
 
@@ -1802,7 +1802,6 @@ web:
 
     #[rstest]
     #[case("  autostart: false", RunState::Stopped, "autostart is false")]
-    #[case("  runtime: docker", RunState::Unsupported, "runtime docker is not supported")]
     fn a_service_up_did_not_start_is_watched_but_never_touched(
         #[case] extra: &str,
         #[case] expect: RunState,
@@ -2299,17 +2298,25 @@ web:
     #[test]
     fn a_request_that_cannot_be_honoured_is_rejected_and_nothing_else_changes() {
         let harness = Harness::new();
-        let services = specs("\ndb:\n  runtime: docker\n  run: \"sleep 30\"\nweb:\n  run: \"sleep 30\"\n");
-        let mut unknown = once_after(is_started, 1, "stop nope");
-        let mut unsupported = once_after(is_started, 1, "restart db");
-        let mut garbled = once_after(is_started, 1, "juggle web");
+        let services = specs("\ndb:\n  run: \"sleep 30\"\nweb:\n  run: \"sleep 30\"\n");
+        let mut unknown = once_after(is_started, 2, "stop nope");
+        let mut unstoppable = once_after(is_started, 2, "restart db");
+        let mut garbled = once_after(is_started, 2, "juggle web");
+        let corrupted = Cell::new(false);
 
         let session = direct(
             &harness,
             &services,
             None,
             &options(100),
-            |events| unknown(events).into_iter().chain(unsupported(events)).chain(garbled(events)).collect(),
+            |events| {
+                // The record naming db's process stops being readable, so `down` cannot prove
+                // which process to signal and refuses. That refusal is what gets reported.
+                if events.iter().filter(|(_, event)| is_started(event)).count() >= 2 && !corrupted.replace(true) {
+                    fs::write(record_path(&harness.state, "db"), "not a record").expect("corrupt");
+                }
+                unknown(events).into_iter().chain(unstoppable(events)).chain(garbled(events)).collect()
+            },
             seen(is_rejected, 3, 2),
         );
 
@@ -2320,13 +2327,13 @@ web:
         );
         let Event::Rejected { request, detail } = &rejected[1] else { unreachable!() };
         assert_eq!(request, "restart db");
-        assert!(detail.contains("runtime docker is not supported"), "{detail}");
+        assert!(!detail.is_empty(), "a refusal always says why");
         assert_eq!(
             rejected[2].to_string(),
             "rejected `juggle web`: unknown request \"juggle\" — expected start, stop or restart"
         );
-        // The service that was running is still the one process it started as.
-        assert_eq!(session.named(is_started), ["web"]);
+        // A restart that could not stop the service did not go on to start another one.
+        assert_eq!(session.named(is_started), ["db", "web"]);
     }
 
     // -----------------------------------------------------------------------------------

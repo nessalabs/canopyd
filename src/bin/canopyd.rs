@@ -1164,7 +1164,7 @@ fn service_context(canopy: &Canopy, given: Option<&str>, env_overrides: &[String
         name: worktree.file_name().unwrap_or(&branch).to_owned(),
         worktree: worktree.clone(),
         branch: branch.clone(),
-        project: canopy.repo().name(),
+        project: canopy.project_name(),
         project_path: canopy.repo().root.clone().unwrap_or_else(|| canopy.repo().common_dir.clone()),
         ports: canopy.ports_for(&branch)?,
         // The forks that are there, which is what `env_for_with` just resolved against too.
@@ -1290,6 +1290,8 @@ fn stop_services_for(canopy: &Canopy, target: &str) -> Result<Vec<String>> {
     let facts = owner.facts();
     let ctx = canopyd::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
     let statuses = canopyd::service::down(&config.services, None, &ctx)?;
+    // The worktree is going away, so what its containers would keep for next time goes too.
+    canopyd::service::purge(&config.services, &ctx);
     Ok(statuses.into_iter().map(|status| status.name).collect())
 }
 

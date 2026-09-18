@@ -251,7 +251,30 @@ period after spawn precisely to catch that. A second `up` is a no-op that return
 pids, so a race loses gracefully instead of double-starting. `--only <name>` starts a subset,
 and `autostart: false` keeps a service registered but unstarted unless you name it.
 
-`runtime: docker` and `compose` report `unsupported` rather than pretending.
+### Containers
+
+`runtime: docker` and `compose:` services are started the same way and supervised by the same
+code, because nothing is detached: a docker service is `docker run --rm --init …` **attached**,
+and a compose service is `docker compose up` attached. The `docker` CLI is then an ordinary
+process — its output is the service's log, its exit code is the service's, and SIGTERM to its
+group is forwarded to the container — so health checks, `restart:`, `logs` and `down` work
+without knowing a container is involved.
+
+- the container is `canopy-<worktree>-<service>`, labelled `canopy=true`, on the shared `canopy`
+  network, with the worktree mounted at `docker.workdir` (`/workspace`) and each of the
+  service's ports published under the same number on both sides
+- environment values reach it as `-e KEY`, taken from the CLI's own environment, so a secret is
+  never in an argument list `ps` would show
+- `docker.dockerfile` is built once under a tag that is the Dockerfile's content hash, and the
+  build's output goes into the service's log
+- `--init` is what lets `down` stop it promptly: a shell that is PID 1 ignores SIGTERM
+- every stop is followed by `docker rm -f` (or `compose stop`), and every start preceded by one,
+  so a container left by a crash never blocks the next start. `rm` takes a compose stack's
+  volumes with it (`compose down -v`)
+- no docker, or a daemon that is not running, is a `failed` service carrying docker's own words;
+  the host services beside it start as usual
+
+`CANOPYD_DOCKER` names the binary, for `podman` or a test.
 
 ## `canopyd down [<branch>]`
 

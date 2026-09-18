@@ -129,6 +129,7 @@ pub struct RunPlan<'a> {
     /// Names only — see the module docs.
     pub env: &'a BTreeMap<String, String>,
     pub ports: &'a [u16],
+    /// `run:`, handed to `sh -c` in the container.
     pub command: &'a str,
 }
 
