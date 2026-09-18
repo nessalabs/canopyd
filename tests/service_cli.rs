@@ -246,6 +246,75 @@ fn logs_capture_what_a_service_printed() {
 }
 
 #[test]
+fn logs_can_be_read_in_pages_that_resume_where_the_last_one_ended() {
+    let (fx, wt) = prepared(
+        "  web:\n    run: echo one; echo two; until [ -f more ]; do sleep 0.05; done; echo three; sleep 120\n",
+    );
+    run(&fx, &["up", "feat/x", "--no-wait"]);
+
+    let page_with = |args: &[&str], want: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let page = run(&fx, args);
+            if page["lines"].as_array().is_some_and(|lines| lines.len() >= want) || std::time::Instant::now() > deadline
+            {
+                return page;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+
+    let first = page_with(&["logs", "web", "feat/x", "--offsets"], 2);
+    let texts: Vec<&str> = first["lines"].as_array().unwrap().iter().map(|l| l["text"].as_str().unwrap()).collect();
+    assert_eq!(texts, ["one", "two"]);
+    assert_eq!(first["lines"][1]["offset"], 4);
+    assert_eq!(first["truncated"], false);
+    let next = first["next_offset"].as_u64().unwrap().to_string();
+
+    // Coming back with the offset yields exactly what was not there before.
+    std::fs::write(wt.join("more"), "").unwrap();
+    let second = page_with(&["logs", "web", "feat/x", "--since", &next], 1);
+    let texts: Vec<&str> = second["lines"].as_array().unwrap().iter().map(|l| l["text"].as_str().unwrap()).collect();
+    assert_eq!(texts, ["three"]);
+
+    // Without `--json` the same read is just the text.
+    let plain = fx.cwt().args(["logs", "web", "feat/x", "--since", "0", "-n", "2"]).output().unwrap();
+    assert_eq!(String::from_utf8(plain.stdout).unwrap(), "one\ntwo\n");
+
+    stop_all(&fx);
+}
+
+#[test]
+fn logs_follow_in_json_is_a_stream_of_events() {
+    use std::io::{BufRead, BufReader};
+
+    let (fx, _wt) = prepared("  web:\n    run: echo one; echo two; sleep 120\n");
+    run(&fx, &["up", "feat/x", "--no-wait"]);
+
+    let mut child = fx
+        .cwt()
+        .args(["logs", "web", "feat/x", "-f", "--json", "--since", "0"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn logs -f");
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("an event");
+        events.push(serde_json::from_str::<serde_json::Value>(&line).expect("one JSON object per line"));
+    }
+    unsafe_free_sigint(child.id());
+    let status = wait_with_timeout(&mut child, std::time::Duration::from_secs(10)).expect("logs -f exited");
+    assert!(status.success(), "Ctrl-C ends a follow cleanly");
+
+    assert_eq!(events[0], serde_json::json!({ "event": "line", "offset": 0, "text": "one" }));
+    assert_eq!(events[1], serde_json::json!({ "event": "line", "offset": 4, "text": "two" }));
+
+    stop_all(&fx);
+}
+
+#[test]
 fn down_on_a_worktree_with_nothing_running_is_not_an_error() {
     let (fx, _wt) = prepared("  web:\n    run: sleep 120\n");
     let out = fx.cwt().args(["down", "feat/x", "--json"]).output().unwrap();

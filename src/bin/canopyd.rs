@@ -136,6 +136,14 @@ enum Command {
         /// How many existing lines to show first.
         #[arg(long, short = 'n', default_value_t = 200)]
         lines: usize,
+        /// Start from this byte offset instead of from the newest lines: the `next_offset` an
+        /// earlier read returned. Implies `--offsets`.
+        #[arg(long)]
+        since: Option<u64>,
+        /// With `--json`, report each line's offset and where to continue from, so a reader can
+        /// come back for exactly what it has not seen.
+        #[arg(long)]
+        offsets: bool,
     },
     /// Carry gitignored files into a worktree, per the `copy:` rules.
     Copy {
@@ -514,10 +522,27 @@ fn run(cli: &Cli) -> Result<u8> {
             report_services(cli, "ps", &statuses);
         }
 
-        Command::Logs { ref service, ref branch, follow, lines } => {
+        Command::Logs { ref service, ref branch, follow, lines, since, offsets } => {
             let branch = resolve_branch(&canopy, branch.as_deref())?;
             let state = canopy.state_dir(&branch);
-            if follow {
+            if follow && cli.json {
+                // A stream, so there is no envelope to end it with: one event per line, until
+                // the caller goes away. `--json` and `-f` together used to mean plain lines,
+                // which is not something a program asking for JSON can use.
+                let interrupted = interrupt_flag()?;
+                let mut out = |event: canopyd::service::LogEvent| {
+                    println!("{}", serde_json::to_string(&event).expect("event is serializable"));
+                };
+                canopyd::service::follow_from(
+                    &state,
+                    service,
+                    since,
+                    lines,
+                    canopyd::service::FOLLOW_POLL,
+                    &mut out,
+                    &|| !interrupted.load(std::sync::atomic::Ordering::Relaxed),
+                )?;
+            } else if follow {
                 // Ctrl-C has to land even on a service that has gone quiet, so the stop
                 // condition is checked on every poll, not only between lines.
                 let interrupted = interrupt_flag()?;
@@ -525,6 +550,15 @@ fn run(cli: &Cli) -> Result<u8> {
                 canopyd::service::follow(&state, service, lines, canopyd::service::FOLLOW_POLL, &mut out, &|| {
                     !interrupted.load(std::sync::atomic::Ordering::Relaxed)
                 })?;
+            } else if since.is_some() || offsets {
+                let page = canopyd::service::page(&state, service, since, lines)?;
+                if cli.json {
+                    emit("logs", &page);
+                } else {
+                    for line in &page.lines {
+                        println!("{}", line.text);
+                    }
+                }
             } else {
                 let tail = canopyd::service::logs(&state, service, lines)?;
                 if cli.json {

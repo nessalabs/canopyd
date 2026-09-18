@@ -275,6 +275,14 @@ died.
 
 - `-n <count>` how many lines to show (default 200)
 - `-f` keep printing as new lines arrive
+- `--offsets` with `--json`: `data` becomes `{ lines: [{ offset, text }], next_offset,
+  truncated }` instead of a list of strings. `offset` is the byte a line starts at
+- `--since <offset>` reads from an offset an earlier read returned as `next_offset`, so a reader
+  that went away comes back for exactly what it missed. `truncated: true` means the log got
+  shorter in the meantime (`gc` does that) and the read started over from the beginning
+- `-f --json` is a stream rather than an envelope: one `{"event":"line","offset":…,"text":…}`
+  per line until the caller goes away, and `{"event":"reset","next_offset":0}` if the log is
+  truncated underneath it
 
 ## `canopyd copy [<branch>]`
 

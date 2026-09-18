@@ -179,6 +179,22 @@ $ canopyd run feat/login --json --control 2>events.ndjson <requests
 With `--control`, requests are lines on stdin — `start web`, `stop web`, `restart web` — and
 end of input ends the run. See the [command reference](cli.md) for what each one means.
 
+### `logs`: pages and streams
+
+`logs <service> --json` is a list of strings. With `--offsets` or `--since <offset>` it is a page a
+reader can resume from:
+
+```json
+{ "lines": [{ "offset": 0, "text": "listening on 5173" }], "next_offset": 18, "truncated": false }
+```
+
+`offset` is the byte a line starts at, and `next_offset` is what to pass as `--since` next time.
+`truncated` means there is history the page does not show: a tail that did not reach the start,
+or a `since` past the end of a log that has since been truncated, in which case the page started
+over from the beginning. `logs -f --json` is a stream of one object per line — `line` events
+shaped like the entries above, and `{"event":"reset","next_offset":0}` when the log is truncated
+underneath the reader.
+
 ## Using it from a script
 
 ```bash
