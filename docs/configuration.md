@@ -57,7 +57,7 @@ that, and it may not match.
 | `env_file` | string or `false` | `.env.canopy` |
 | `worktree` | [worktree](#worktree) | see below |
 | `copy` | list of [rule](#copy) | `[]` |
-| `databases` | name → database | `{}` — **parsed but not yet supported**; warns |
+| `databases` | name → database | `{}` — see [Databases](#databases) |
 
 **Names** — for ports, services and databases — may contain lowercase letters, digits, `_` and
 `-`, and must start with a letter or digit. The rule is strict because a name has to be safe in
@@ -80,7 +80,7 @@ steps:
 | `worktree` | `${worktree.path}`, `${worktree.name}` | this checkout |
 | `project` | `${project.name}` | the repository |
 | `env` | `${env.BASE}` | another variable **declared in this file** |
-| `db` | `${db.main.url}` | a database fork — recognised, not yet resolved |
+| `db` | `${db.main}`, `${db.main.url}`, `${db.main.file}` | this worktree's fork of a database. No fork, no value: the reference stays as written |
 
 Scopes and resource names are lowercase `[a-z0-9_-]`, the same rule ports and services follow —
 so `${ports.WEB}` names something that cannot exist and stays literal. The `env` scope is the
@@ -337,7 +337,71 @@ would be worse than a clear message.
 - a `localhost` health URL (the `::1` trap above)
 - a declared port no service references
 - no services at all
-- `databases:` — recognised, not yet supported
+
+## Databases
+
+A worktree that shares a database with `main` is not isolated: a migration run on the branch is
+a migration run on `main`. A **fork** is a private copy, made with `canopyd db fork`, kept with
+the worktree's other state, and removed with it.
+
+```yaml
+databases:
+  main:
+    adapter: sqlite
+    source: data/dev.db     # the seed, relative to the primary checkout
+    env: DATABASE_URL       # defaults to <NAME>_URL
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `adapter` | required | `sqlite`, `postgres`, `mysql` or `redis` |
+| `source` | none | sqlite: the file each fork is copied from. Missing means forks start empty |
+| `env` | `<NAME>_URL` | the variable that receives the fork's URL |
+| `version` | `16` / `8` / `7` | the image tag for postgres / mysql / redis. For postgres, also which shared server a fork lives on |
+| `seed` | none | postgres and mysql: one of `dump:`, `sql:` or `command:` (migrations, run with `DATABASE_URL` pointing at the template). Postgres takes a `pg_dump -Fc` file as `dump:`; mysql's is plain SQL |
+| `options.extensions` | none | postgres: comma-separated, `CREATE EXTENSION IF NOT EXISTS` in the template |
+| `runtime` | | accepted for `redis`; every server fork runs in docker |
+
+Once a fork exists its URL is in the worktree's environment three ways: under `env`, as
+`CANOPY_DB_<NAME>_URL`, and as `${db.<name>.url}` for anything in this file. It is layered
+**after** `env:`, so a `DATABASE_URL` the file sets for people running without canopyd is
+replaced by the fork's, and **before** a caller's `--env`, which wins. A fork that has gone
+missing from disk is left out entirely, so nothing is pointed at a database that is not there.
+
+### Postgres
+
+Needs docker, and nothing else: the server brings `psql` and `pg_restore` with it. There is
+**one server per version** — a `canopy-pg-16` container on `127.0.0.1:54316`, user and password
+`canopy` — and one database per worktree on it. The project's seed is loaded once into a
+template database, `tpl_<project>_<name>`, and every fork is `CREATE DATABASE … TEMPLATE …`,
+which Postgres does as a file copy: a multi-gigabyte seed forks in seconds.
+
+`${db.<name>.host}`, `.port`, `.database`, `.user`, `.password` and `.container` are there for a
+driver that wants parts rather than a URL. `canopyd db template` rebuilds the template after the
+seed changes; existing forks keep their data. The server and its templates are shared with the
+Canopy app, which uses the same names, so a machine with both has one server and not two.
+
+### MySQL and Redis
+
+Neither can clone a database inside a server, so each fork **is** a small server of its own: a
+`canopy-mysql-<worktree>-<name>` or `canopy-redis-<worktree>-<name>` container on a port taken
+from the same registry as the worktree's other ports (as `db-<name>`, so it never moves for the
+life of the branch and is handed back with the rest). Removing the fork removes the server.
+
+- **MySQL** pays for seeding once per project. The template is a SQL file kept beside the
+  worktrees' state: a copy of `seed.dump` / `seed.sql`, or, for `seed.command`, the dump of a
+  throwaway server the command was run against. Every fork replays that one file into its
+  database, `app`, as `root` / `canopy`. `db template` rebuilds it.
+- **Redis** has no template: a new fork is an empty server with `--appendonly yes`. `--from
+  <branch>` copies that branch's data directory in *before* the server starts, which is the only
+  moment Redis reads it.
+
+`${db.<name>.host}`, `.port` and `.container` are fields of both; MySQL adds `.database`,
+`.user` and `.password`.
+
+All or none: whether each selected fork *can* be made is asked before any is. With docker off,
+`db fork` makes nothing — not even a SQLite fork that needs no docker — because a worktree
+pointed at a shared server database beside a private SQLite one would look provisioned.
 
 ## A complete example
 

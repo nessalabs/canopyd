@@ -376,7 +376,6 @@ pub fn lint(config: &CanopyConfig) -> Vec<Diagnostic> {
 
     for (name, db) in &config.databases {
         let where_ = format!("databases.{name}");
-        out.push(Diagnostic::warning(&where_, "databases are not supported by this version of canopyd — ignored"));
         if db.seed.as_ref().is_some_and(|s| [&s.dump, &s.sql, &s.command].iter().filter(|v| v.is_some()).count() > 1) {
             out.push(Diagnostic::error(&format!("{where_}.seed"), "use one of `dump`, `sql` or `command`"));
         }

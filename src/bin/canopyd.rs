@@ -221,6 +221,9 @@ enum Command {
         #[arg(long)]
         log_cap: Option<u64>,
     },
+    /// Database forks: a private copy of each declared database for a worktree.
+    #[command(subcommand)]
+    Db(DbCommand),
     /// The git post-checkout bridge, so a worktree made by plain `git worktree add` is noticed.
     #[command(subcommand)]
     Hook(HookCommand),
@@ -233,6 +236,45 @@ enum Command {
         /// What to do with the branch afterwards.
         #[arg(long, value_enum, default_value = "never")]
         delete_branch: DeleteBranchArg,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum DbCommand {
+    /// Fork the databases that do not have a fork yet. One that does is left as it is.
+    Fork {
+        /// Defaults to the branch of the worktree you are in.
+        branch: Option<String>,
+        /// Fork only these databases. Repeatable.
+        #[arg(long)]
+        only: Vec<String>,
+        /// What a new fork starts as: `template` (the project's seed), `empty`, or the name of
+        /// a branch whose fork to copy.
+        #[arg(long, default_value = "template")]
+        from: String,
+    },
+    /// Show the worktree's forks, checked against what is on disk.
+    Ls { branch: Option<String> },
+    /// Throw one fork away and make it again.
+    Reset {
+        name: String,
+        branch: Option<String>,
+        #[arg(long, default_value = "template")]
+        from: String,
+    },
+    /// Rebuild seed templates from their seeds. Existing forks are untouched.
+    Template {
+        branch: Option<String>,
+        /// Rebuild only these. Repeatable.
+        #[arg(long)]
+        only: Vec<String>,
+    },
+    /// Remove the worktree's forks.
+    Drop {
+        branch: Option<String>,
+        /// Remove only these. Repeatable.
+        #[arg(long)]
+        only: Vec<String>,
     },
 }
 
@@ -312,6 +354,11 @@ impl Command {
             Command::Run { .. } => "run",
             Command::Doctor => "doctor",
             Command::Gc { .. } => "gc",
+            Command::Db(DbCommand::Fork { .. }) => "db fork",
+            Command::Db(DbCommand::Ls { .. }) => "db ls",
+            Command::Db(DbCommand::Reset { .. }) => "db reset",
+            Command::Db(DbCommand::Template { .. }) => "db template",
+            Command::Db(DbCommand::Drop { .. }) => "db drop",
             Command::Hook(HookCommand::Install) => "hook install",
             Command::Hook(HookCommand::Uninstall) => "hook uninstall",
             Command::Hook(HookCommand::Status) => "hook status",
@@ -778,6 +825,55 @@ fn run(cli: &Cli) -> Result<u8> {
             }
         }
 
+        Command::Db(DbCommand::Fork { ref branch, ref only, ref from }) => {
+            let branch = resolve_branch(&canopy, branch.as_deref())?;
+            let forks = canopy.db_fork(&branch, selection(only).as_ref(), &canopyd::DbFrom::parse(from))?;
+            report_databases(cli, "db fork", &forks);
+        }
+
+        Command::Db(DbCommand::Ls { ref branch }) => {
+            let branch = resolve_branch(&canopy, branch.as_deref())?;
+            report_databases(cli, "db ls", &canopy.db_list(&branch)?);
+        }
+
+        Command::Db(DbCommand::Reset { ref name, ref branch, ref from }) => {
+            let branch = resolve_branch(&canopy, branch.as_deref())?;
+            let fork = canopy.db_reset(&branch, name, &canopyd::DbFrom::parse(from))?;
+            if cli.json {
+                emit("db reset", &fork);
+            } else {
+                report_databases(cli, "db reset", std::slice::from_ref(&fork));
+            }
+        }
+
+        Command::Db(DbCommand::Template { ref branch, ref only }) => {
+            let branch = resolve_branch(&canopy, branch.as_deref())?;
+            let rebuilt = canopy.db_refresh_templates(&branch, selection(only).as_ref())?;
+            if cli.json {
+                emit("db template", &serde_json::json!({ "rebuilt": rebuilt }));
+            } else if rebuilt.is_empty() {
+                println!("no templates to rebuild");
+            } else {
+                for name in &rebuilt {
+                    println!("rebuilt {name}");
+                }
+            }
+        }
+
+        Command::Db(DbCommand::Drop { ref branch, ref only }) => {
+            let branch = resolve_branch(&canopy, branch.as_deref())?;
+            let dropped = canopy.db_drop(&branch, selection(only).as_ref())?;
+            if cli.json {
+                emit("db drop", &serde_json::json!({ "dropped": dropped }));
+            } else if dropped.is_empty() {
+                println!("no forks");
+            } else {
+                for name in &dropped {
+                    println!("dropped {name}");
+                }
+            }
+        }
+
         Command::Doctor => {
             let report = canopyd::doctor::diagnose(canopy.repo(), &canopy.state_root(), &canopy.ports_path())?;
             // Only an error fails the command. A warning is debris `gc` sweeps as a matter of
@@ -840,6 +936,11 @@ fn run(cli: &Cli) -> Result<u8> {
             // that no longer exist and slowly exhausts the range.
             let released =
                 outcome.branch.as_deref().map(|branch| canopy.release_ports(branch)).transpose()?.unwrap_or(0);
+            // A file-backed fork goes with the state directory below. One on a server does not:
+            // it has to be dropped while the record that names it still exists. Best effort, like
+            // everything after the checkout is gone — there is no worktree left to fail for.
+            let dropped =
+                outcome.branch.as_deref().and_then(|branch| canopy.db_drop(branch, None).ok()).unwrap_or_default();
             let state = outcome.branch.as_deref().map(|branch| canopy.state_dir(branch));
             if let Some(state) = state.filter(|path| path.exists()) {
                 // The records and logs describe a worktree that is gone.
@@ -854,6 +955,7 @@ fn run(cli: &Cli) -> Result<u8> {
                         "branch_deleted": outcome.branch_deleted,
                         "ports_released": released,
                         "services_stopped": stopped,
+                        "databases_dropped": dropped,
                     }),
                 );
             } else {
@@ -1056,6 +1158,7 @@ struct FactsOwner {
     project: String,
     project_path: Utf8PathBuf,
     ports: std::collections::BTreeMap<String, u16>,
+    databases: Vec<canopyd::db::DbInstance>,
 }
 
 impl FactsOwner {
@@ -1067,6 +1170,7 @@ impl FactsOwner {
             project: &self.project,
             project_path: &self.project_path,
             ports: &self.ports,
+            databases: &self.databases,
         }
     }
 }
@@ -1088,9 +1192,15 @@ fn service_context(canopy: &Canopy, given: Option<&str>, env_overrides: &[String
         name: worktree.file_name().unwrap_or(&branch).to_owned(),
         worktree: worktree.clone(),
         branch: branch.clone(),
-        project: canopy.repo().name(),
+        project: canopy.project_name(),
         project_path: canopy.repo().root.clone().unwrap_or_else(|| canopy.repo().common_dir.clone()),
         ports: canopy.ports_for(&branch)?,
+        // The forks that are there, which is what `env_for_with` just resolved against too.
+        databases: canopy
+            .db_list(&branch)?
+            .into_iter()
+            .filter(|db| db.status == canopyd::db::ForkStatus::Ready)
+            .collect(),
     };
     Ok((branch, worktree, state, env, owner))
 }
@@ -1208,6 +1318,8 @@ fn stop_services_for(canopy: &Canopy, target: &str) -> Result<Vec<String>> {
     let facts = owner.facts();
     let ctx = canopyd::ServiceContext { worktree: &worktree, state: &state, env: &env, facts: &facts };
     let statuses = canopyd::service::down(&config.services, None, &ctx)?;
+    // The worktree is going away, so what its containers would keep for next time goes too.
+    canopyd::service::purge(&config.services, &ctx);
     Ok(statuses.into_iter().map(|status| status.name).collect())
 }
 
@@ -1227,6 +1339,24 @@ fn interrupt_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
         signal_hook::flag::register(signal, flag.clone()).map_err(Error::Io)?;
     }
     Ok(flag)
+}
+
+fn report_databases(cli: &Cli, command: &str, forks: &[canopyd::db::DbInstance]) {
+    if cli.json {
+        emit(command, &forks);
+        return;
+    }
+    if forks.is_empty() {
+        println!("no forks");
+        return;
+    }
+    for fork in forks {
+        let status = match fork.status {
+            canopyd::db::ForkStatus::Ready => "ready",
+            canopyd::db::ForkStatus::Missing => "missing",
+        };
+        println!("{:<16} {:<8} {:<8} {}", fork.name, format!("{:?}", fork.adapter).to_lowercase(), status, fork.url);
+    }
 }
 
 fn report_services(cli: &Cli, command: &str, statuses: &[canopyd::ServiceStatus]) {

@@ -202,14 +202,6 @@ fn autostart_false_is_left_alone() {
 }
 
 #[test]
-fn a_docker_service_is_reported_unsupported_rather_than_silently_skipped() {
-    // Pretending to start something we cannot start is worse than saying so.
-    let (fx, _wt) = prepared("  web:\n    runtime: docker\n    run: true\n    docker:\n      image: nginx\n");
-    let started = run(&fx, &["up", "feat/x", "--no-wait"]);
-    assert_eq!(started[0]["state"], "unsupported", "{started}");
-}
-
-#[test]
 fn the_run_command_sees_its_allocated_port() {
     let (fx, wt) = prepared("  web:\n    run: echo ${ports.web} > port.txt\n");
     run(&fx, &["up", "feat/x", "--no-wait"]);

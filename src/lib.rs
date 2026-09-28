@@ -15,7 +15,9 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod container;
 pub mod copy;
+pub mod db;
 pub mod doctor;
 pub mod env;
 pub mod error;
@@ -36,6 +38,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 
 pub use config::{CanopyConfig, ConfigSource, Diagnostic, LocatedConfig, Parsed, Severity, WorktreeSpec, parse_str};
+pub use db::{DbInstance, ForkStatus};
 pub use doctor::{Finding, Report, Severity as FindingSeverity, Swept};
 pub use env::{EnvSource, EnvTable, EnvVar, Facts};
 pub use error::{Error, ErrorCode, Result};
@@ -198,13 +201,24 @@ impl Canopy {
         overrides: &std::collections::BTreeMap<String, String>,
     ) -> Result<env::EnvTable> {
         let ports = self.ports_for(branch)?;
+        // Only forks that are actually there: see `db::ready`.
+        let project_root = self.project_path();
+        let state = self.state_dir(branch);
+        let no_env = std::collections::BTreeMap::new();
+        let project_name = self.project_name();
+        let ports_path = self.ports_path();
+        let databases = db::ready(&db::DbContext {
+            project_path: &project_root,
+            project: &project_name,
+            state: &state,
+            env: &no_env,
+            branch,
+            ports: &ports_path,
+        })?;
         let default_config = config::CanopyConfig::empty();
         let config = self.config().and_then(|(_, parsed)| parsed.config.as_ref()).unwrap_or(&default_config);
         let name = worktree.file_name().unwrap_or(branch).to_owned();
-        // A config that names itself means it: `${project.name}` and CANOPY_PROJECT should say
-        // what the project is called, not what someone happened to call the directory they
-        // cloned into. The directory name is the fallback, not the answer.
-        let project = config.name.clone().unwrap_or_else(|| self.repo.name());
+        let project = self.project_name();
         let project_path = self.repo.root.clone().unwrap_or_else(|| self.repo.common_dir.clone());
         let facts = env::Facts {
             worktree_name: &name,
@@ -213,8 +227,117 @@ impl Canopy {
             project: &project,
             project_path: &project_path,
             ports: &ports,
+            databases: &databases,
         };
         Ok(env::resolve(config, &facts, overrides))
+    }
+
+    /// What the project is called. A config that names itself means it: `${project.name}`,
+    /// `CANOPY_PROJECT` and an image tag should say what the project is called, not what
+    /// someone happened to call the directory they cloned into. The directory name is the
+    /// fallback, not the answer.
+    pub fn project_name(&self) -> String {
+        let named = self.config().and_then(|(_, parsed)| parsed.config.as_ref()).and_then(|config| config.name.clone());
+        named.unwrap_or_else(|| self.repo.name())
+    }
+
+    /// The primary checkout, or the git directory of a bare repository. Seeds are named
+    /// relative to it, so every worktree forks the same one.
+    pub fn project_path(&self) -> Utf8PathBuf {
+        self.repo.root.clone().unwrap_or_else(|| self.repo.common_dir.clone())
+    }
+
+    /// The databases `canopy.yaml` declares. None when there is no config.
+    fn declared_databases(&self) -> std::collections::BTreeMap<String, config::DatabaseSpec> {
+        self.config().and_then(|(_, parsed)| parsed.config.as_ref()).map(|c| c.databases.clone()).unwrap_or_default()
+    }
+
+    /// Forks the branch's databases that do not have a fork yet, and reports every selected one.
+    pub fn db_fork(
+        &self,
+        branch: &str,
+        only: Option<&std::collections::BTreeSet<String>>,
+        from: &DbFrom,
+    ) -> Result<Vec<db::DbInstance>> {
+        let (project, state) = (self.project_path(), self.state_dir(branch));
+        let ports_path = self.ports_path();
+        let theirs = from.branch().map(|other| self.state_dir(other));
+        let source = from.source(theirs.as_deref());
+        let ctx = db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+            branch,
+            ports: &ports_path,
+        };
+        Ok(db::fork(&self.declared_databases(), only, &ctx, &source)?)
+    }
+
+    /// The branch's recorded forks, as they stand on disk.
+    pub fn db_list(&self, branch: &str) -> Result<Vec<db::DbInstance>> {
+        let (project, state) = (self.project_path(), self.state_dir(branch));
+        let ports_path = self.ports_path();
+        Ok(db::list(&db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+            branch,
+            ports: &ports_path,
+        })?)
+    }
+
+    /// Throws one fork away and makes it again.
+    pub fn db_reset(&self, branch: &str, name: &str, from: &DbFrom) -> Result<db::DbInstance> {
+        let (project, state) = (self.project_path(), self.state_dir(branch));
+        let ports_path = self.ports_path();
+        let theirs = from.branch().map(|other| self.state_dir(other));
+        let source = from.source(theirs.as_deref());
+        let ctx = db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+            branch,
+            ports: &ports_path,
+        };
+        Ok(db::reset(&self.declared_databases(), name, &ctx, &source)?)
+    }
+
+    /// Rebuilds the seed templates of the selected databases and returns their names. Only
+    /// server databases have one: SQLite's template is its seed file, read at fork time.
+    pub fn db_refresh_templates(
+        &self,
+        branch: &str,
+        only: Option<&std::collections::BTreeSet<String>>,
+    ) -> Result<Vec<String>> {
+        let (project, state) = (self.project_path(), self.state_dir(branch));
+        let ports_path = self.ports_path();
+        let ctx = db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+            branch,
+            ports: &ports_path,
+        };
+        Ok(db::refresh_templates(&self.declared_databases(), only, &ctx)?)
+    }
+
+    /// Removes the branch's forks, all of them or `only`, and returns the names that had one.
+    pub fn db_drop(&self, branch: &str, only: Option<&std::collections::BTreeSet<String>>) -> Result<Vec<String>> {
+        let (project, state) = (self.project_path(), self.state_dir(branch));
+        let ports_path = self.ports_path();
+        let ctx = db::DbContext {
+            project_path: &project,
+            project: &self.project_name(),
+            state: &state,
+            env: &std::collections::BTreeMap::new(),
+            branch,
+            ports: &ports_path,
+        };
+        Ok(db::drop_forks(&self.declared_databases(), only, &ctx)?)
     }
 
     /// Where every worktree's state lives. `doctor` and `gc` walk this to find debris.
@@ -247,6 +370,44 @@ pub struct RepoInfo {
     pub git_dir: Utf8PathBuf,
     pub bare: bool,
     pub worktrees: usize,
+}
+
+/// What a fork starts as, in the terms a caller has: a word, or another branch's name.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DbFrom {
+    /// The project's seed.
+    #[default]
+    Template,
+    Empty,
+    /// Another worktree's fork, named by its branch.
+    Branch(String),
+}
+
+impl DbFrom {
+    /// `template`, `empty`, or anything else as a branch name.
+    pub fn parse(text: &str) -> DbFrom {
+        match text {
+            "template" => DbFrom::Template,
+            "empty" => DbFrom::Empty,
+            branch => DbFrom::Branch(branch.to_owned()),
+        }
+    }
+
+    fn branch(&self) -> Option<&str> {
+        match self {
+            DbFrom::Branch(branch) => Some(branch),
+            DbFrom::Template | DbFrom::Empty => None,
+        }
+    }
+
+    /// `state` is the other branch's state directory, and is only consulted for [`DbFrom::Branch`].
+    fn source<'a>(&'a self, state: Option<&'a Utf8Path>) -> db::ForkSource<'a> {
+        match (self, state) {
+            (DbFrom::Branch(branch), Some(state)) => db::ForkSource::Worktree { branch, state },
+            (DbFrom::Empty, _) => db::ForkSource::Empty,
+            (DbFrom::Template | DbFrom::Branch(_), _) => db::ForkSource::Template,
+        }
+    }
 }
 
 /// The documentation's code examples, compiled as doctests.

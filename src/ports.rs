@@ -877,8 +877,14 @@ mod tests {
             assert!(HostProbe::with_ipv6(false).is_free(held_on_v6), "IPv4 was busy for a port we confirmed free");
         });
 
-        let spare = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
-        assert!(probe.is_free(spare), "a port nobody holds was reported busy");
+        // A port the OS just handed out and took back is free — unless another test, running at
+        // the same moment, was handed the same one. So ask about several: a probe that calls
+        // free ports busy fails every one of them, and a neighbour can only ever take one.
+        let some_spare_is_free = (0..32).any(|_| {
+            let spare = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap().port();
+            probe.is_free(spare)
+        });
+        assert!(some_spare_is_free, "ports nobody holds were all reported busy");
     }
 
     #[test]

@@ -64,6 +64,7 @@ Branch on `code`. It is a stable API; `message` is for humans and may be reworde
 | `service_failed` | 1 | A service would not start or would not become healthy. |
 | `repository_unhealthy` | 1 | `doctor` found something only a person can settle. Warnings — the debris `gc` sweeps — do **not** produce this. |
 | `locked` | **3** | Another `canopyd` holds the lock. Retry. |
+| `db_failed` | 1 | A fork could not be made or read: docker is off or said no, there is no source fork to copy, or the record will not parse. Nothing is forked unless everything selected can be. |
 | `io` | 1 | A filesystem or encoding problem. |
 
 Codes for commands not yet implemented are listed because they are already reserved — the set

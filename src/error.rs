@@ -26,6 +26,7 @@ pub enum ErrorCode {
     ServiceFailed,
     RepositoryUnhealthy,
     Locked,
+    DbFailed,
     Io,
 }
 
@@ -48,6 +49,7 @@ impl ErrorCode {
             ErrorCode::ServiceFailed => "service_failed",
             ErrorCode::RepositoryUnhealthy => "repository_unhealthy",
             ErrorCode::Locked => "locked",
+            ErrorCode::DbFailed => "db_failed",
             ErrorCode::Io => "io",
         }
     }
@@ -78,6 +80,7 @@ impl ErrorCode {
         ErrorCode::ServiceFailed,
         ErrorCode::RepositoryUnhealthy,
         ErrorCode::Locked,
+        ErrorCode::DbFailed,
         ErrorCode::Io,
     ];
 }
@@ -190,6 +193,12 @@ impl From<crate::copy::CopyError> for Error {
             crate::copy::CopyError::NonUtf8Path(_) => ErrorCode::Io,
         };
         Error::Module { code, message: error.to_string() }
+    }
+}
+
+impl From<crate::db::DbError> for Error {
+    fn from(error: crate::db::DbError) -> Error {
+        Error::Module { code: error.code(), message: error.to_string() }
     }
 }
 

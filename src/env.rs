@@ -75,6 +75,8 @@ pub enum EnvSource {
     Config,
     /// Handed in by the caller — a `--env` flag, a saved per-worktree setting.
     Override,
+    /// A database fork's URL, under the variable its spec names.
+    Database,
     /// A service's own `env:`.
     Service,
 }
@@ -246,12 +248,15 @@ type Scope = BTreeMap<String, BTreeMap<String, String>>;
 
 /// One reference's value, or `None` to leave it written as it was.
 ///
-/// The grammar has a third segment (`${db.main.url}`) but every bucket here is flat, so the
-/// field is a refinement we do not yet have a use for: `${worktree.path.x}` resolves to
-/// `worktree.path`, the same fallback the daemon applies. Database forks will be the first
-/// scope with real fields, and this is the function that gains the dotted lookup.
+/// The grammar has a third segment (`${db.main.url}`), and database forks are the scope with
+/// real fields: `${db.main.file}` is a different value from `${db.main}`. A field is looked up
+/// as `name.field` first. Every other bucket is flat, so there the field finds nothing and the
+/// reference falls back to the name — `${worktree.path.x}` is `worktree.path`, the same
+/// fallback the daemon applies.
 fn lookup<'a>(scope: &'a Scope, reference: &TemplateRef) -> Option<&'a str> {
-    scope.get(&reference.scope)?.get(&reference.name).map(String::as_str)
+    let bucket = scope.get(&reference.scope)?;
+    let dotted = reference.field.as_ref().and_then(|field| bucket.get(&format!("{}.{field}", reference.name)));
+    dotted.or_else(|| bucket.get(&reference.name)).map(String::as_str)
 }
 
 /// The one `${…}` a chunk contains, if it is a reference at all.
@@ -287,7 +292,7 @@ fn substitute(text: &str, scope: &Scope) -> String {
 }
 
 /// `main-db` → `MAIN_DB`: the shape every generated env key uses.
-fn upper_snake(name: &str) -> String {
+pub(crate) fn upper_snake(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut in_separator = false;
     for ch in name.chars() {
@@ -321,6 +326,9 @@ pub struct Facts<'a> {
     pub project_path: &'a Utf8Path,
     /// Named port → the number allocated to this worktree.
     pub ports: &'a BTreeMap<String, u16>,
+    /// This worktree's database forks: only the ones that are there. A recorded fork that has
+    /// gone missing is left out, so nothing is pointed at a database that does not exist.
+    pub databases: &'a [crate::db::DbInstance],
 }
 
 /// The project-wide environment: Canopy's facts, `defaults.env`, `env:`, then the caller's
@@ -377,10 +385,19 @@ impl<'a> Resolver<'a> {
             ("name".to_owned(), facts.project.to_owned()),
             ("path".to_owned(), facts.project_path.to_string()),
         ]);
-        // No `db` bucket: this crate does not fork databases, so `${db.x.url}` finds no scope
-        // and stays visible as an unresolved reference instead of becoming an empty string.
+        // `${db.main}` and `${db.main.url}` are the URL; every other field is `${db.main.<field>}`.
+        // A database with no fork has no entry, so a reference to it stays visible as written
+        // instead of becoming an empty string.
+        let mut db = BTreeMap::new();
+        for instance in facts.databases {
+            db.insert(instance.name.clone(), instance.url.clone());
+            for (field, value) in instance.fields() {
+                db.insert(format!("{}.{field}", instance.name), value);
+            }
+        }
         let scope = Scope::from([
             ("ports".to_owned(), ports),
+            ("db".to_owned(), db),
             ("worktree".to_owned(), worktree),
             ("project".to_owned(), project),
             ("env".to_owned(), BTreeMap::new()),
@@ -392,6 +409,12 @@ impl<'a> Resolver<'a> {
         self.canopy_facts();
         self.layer(&config.defaults.env, EnvSource::Defaults);
         self.layer(&config.env, EnvSource::Config);
+        // After the file, so a fork's URL is what `DATABASE_URL` means even when the file sets a
+        // shared one for people who run without canopyd. Before the overrides, because a caller
+        // who names a URL explicitly has decided.
+        for instance in self.facts.databases {
+            self.record(&instance.env_key, instance.url.clone(), EnvSource::Database);
+        }
         self.layer(overrides, EnvSource::Override);
     }
 
@@ -412,6 +435,10 @@ impl<'a> Resolver<'a> {
         }
         for (name, port) in facts.ports {
             self.record(&format!("CANOPY_PORT_{}", upper_snake(name)), port.to_string(), EnvSource::Canopy);
+        }
+        for instance in facts.databases {
+            let key = format!("CANOPY_DB_{}_URL", upper_snake(&instance.name));
+            self.record(&key, instance.url.clone(), EnvSource::Canopy);
         }
     }
 
@@ -506,6 +533,7 @@ mod tests {
                 project: &self.project,
                 project_path: &self.project_path,
                 ports: &self.ports,
+                databases: &[],
             }
         }
     }

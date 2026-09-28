@@ -251,7 +251,30 @@ period after spawn precisely to catch that. A second `up` is a no-op that return
 pids, so a race loses gracefully instead of double-starting. `--only <name>` starts a subset,
 and `autostart: false` keeps a service registered but unstarted unless you name it.
 
-`runtime: docker` and `compose` report `unsupported` rather than pretending.
+### Containers
+
+`runtime: docker` and `compose:` services are started the same way and supervised by the same
+code, because nothing is detached: a docker service is `docker run --rm --init …` **attached**,
+and a compose service is `docker compose up` attached. The `docker` CLI is then an ordinary
+process — its output is the service's log, its exit code is the service's, and SIGTERM to its
+group is forwarded to the container — so health checks, `restart:`, `logs` and `down` work
+without knowing a container is involved.
+
+- the container is `canopy-<worktree>-<service>`, labelled `canopy=true`, on the shared `canopy`
+  network, with the worktree mounted at `docker.workdir` (`/workspace`) and each of the
+  service's ports published under the same number on both sides
+- environment values reach it as `-e KEY`, taken from the CLI's own environment, so a secret is
+  never in an argument list `ps` would show
+- `docker.dockerfile` is built once under a tag that is the Dockerfile's content hash, and the
+  build's output goes into the service's log
+- `--init` is what lets `down` stop it promptly: a shell that is PID 1 ignores SIGTERM
+- every stop is followed by `docker rm -f` (or `compose stop`), and every start preceded by one,
+  so a container left by a crash never blocks the next start. `rm` takes a compose stack's
+  volumes with it (`compose down -v`)
+- no docker, or a daemon that is not running, is a `failed` service carrying docker's own words;
+  the host services beside it start as usual
+
+`CANOPYD_DOCKER` names the binary, for `podman` or a test.
 
 ## `canopyd down [<branch>]`
 
@@ -400,6 +423,33 @@ that asserts exactly that.
 
 Events go to stderr as they happen (one JSON object per line under `--json`), so stdout stays
 the final envelope.
+
+## `canopyd db`
+
+Database forks: a private copy of each database `canopy.yaml` declares, per worktree. See
+[Databases](configuration.md#databases) for what a fork is and how its URL reaches a service.
+
+```console
+$ canopyd db fork feat/login
+main             sqlite   ready    file:/…/state/feat-login/db/main.db
+```
+
+- `db fork [<branch>]` forks what does not have a fork yet. One that exists is **left alone** —
+  the data in it is somebody's work. `--only <name>` restricts it; `--from` says what a new fork
+  starts as: `template` (the seed, the default), `empty`, or a **branch name** to copy that
+  worktree's fork
+- `db ls [<branch>]` lists forks, re-checked against the disk: one whose file is gone is `missing`
+- `db reset <name> [<branch>]` throws a fork away and makes it again; takes `--from` too
+- `db template [<branch>]` rebuilds seed templates from their seeds, all or `--only`. Forks that
+  exist keep their data; the next one is made from the new template. SQLite has none to rebuild
+- `db drop [<branch>]` removes forks, all or `--only`. `rm` does this for the whole worktree,
+  including dropping a fork that lives on a server
+- `db reset` checks that a new fork *can* be made before it drops the old one, so docker being
+  off costs you nothing
+
+All or none: whether each selected fork can be made is asked first, so docker being off is a
+`db_failed` for the **whole** call and nothing is forked. Half a set of forks leaves a worktree
+pointed at a shared database without saying so.
 
 ## `canopyd doctor`
 
