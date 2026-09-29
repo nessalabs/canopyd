@@ -76,7 +76,8 @@ fn port_for(name: &str, ctx: &DbContext<'_>) -> Result<u16, DbError> {
     let wanted = BTreeMap::from([(key.clone(), PortSpec::default())]);
     let parent = ctx.ports.parent().unwrap_or(ctx.ports);
     fs::create_dir_all(parent).map_err(|source| DbError::Io { path: parent.to_owned(), source })?;
-    let mut registry = crate::ports::Registry::load(ctx.ports).map_err(|error| engine(name, error.to_string()))?;
+    let mut registry =
+        crate::ports::open(ctx.ports, ctx.ports_owner).map_err(|error| engine(name, error.to_string()))?;
     let table = registry.allocate(ctx.project, ctx.branch, &wanted).map_err(|error| engine(name, error.to_string()))?;
     Ok(table[&key])
 }

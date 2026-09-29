@@ -184,9 +184,15 @@ pub fn diagnose_with(
 
     match read_registry(ports) {
         Ok(rows) => {
-            findings.extend(check_stale_rows(&rows, &worktrees));
+            // A shared registry holds other repositories' rows too. Only this one's can be
+            // judged stale or foreign against this repository's worktrees; a port claimed
+            // twice is damage whoever holds it.
+            let owner = crate::ports::owner_for(&repo.common_dir);
+            let own: Vec<Allocation> =
+                rows.iter().filter(|row| crate::ports::is_owned_by(row, &owner)).cloned().collect();
+            findings.extend(check_stale_rows(&own, &worktrees));
             findings.extend(check_duplicate_ports(&rows));
-            findings.extend(check_foreign_ports(&rows, state_root, options.bind));
+            findings.extend(check_foreign_ports(&own, state_root, options.bind));
         }
         Err(detail) => findings.push(Finding {
             check: "port_registry_unreadable".to_owned(),
@@ -412,7 +418,7 @@ pub fn gc(repo: &Repo, state_root: &Utf8Path, ports: &Utf8Path) -> Result<Swept,
 pub fn gc_with(repo: &Repo, state_root: &Utf8Path, ports: &Utf8Path, log_cap: u64) -> Result<Swept, DoctorError> {
     let worktrees = repo.worktrees()?;
     Ok(Swept {
-        ports_released: release_stale_rows(ports, &worktrees)?,
+        ports_released: release_stale_rows(ports, &crate::ports::owner_for(&repo.common_dir), &worktrees)?,
         // Records first: clearing the dead ones is what can leave a directory with nothing
         // alive in it, and only such a directory may be removed.
         records_removed: remove_dead_records(state_root)?,
@@ -422,11 +428,11 @@ pub fn gc_with(repo: &Repo, state_root: &Utf8Path, ports: &Utf8Path, log_cap: u6
 }
 
 /// Drops every row whose branch git no longer lists. Returns how many rows went.
-fn release_stale_rows(ports: &Utf8Path, worktrees: &[WorktreeEntry]) -> Result<usize, DoctorError> {
+fn release_stale_rows(ports: &Utf8Path, owner: &str, worktrees: &[WorktreeEntry]) -> Result<usize, DoctorError> {
     let live = live_branches(worktrees);
-    let mut registry = Registry::load(ports)?;
+    let mut registry = Registry::load(ports)?.with_owner(owner);
     let stale: BTreeSet<String> = registry
-        .rows()
+        .own_rows()
         .iter()
         .filter(|row| !live.contains(row.branch.as_str()))
         .map(|row| row.branch.clone())
@@ -606,7 +612,7 @@ fn read_registry(path: &Utf8Path) -> Result<Vec<Allocation>, String> {
     // Sorted the way `ports::Registry` sorts it, so what `doctor` reports does not depend on
     // the order somebody's editor left the file in.
     let mut rows = file.allocations;
-    rows.sort_by(|a, b| (&a.branch, &a.name).cmp(&(&b.branch, &b.name)));
+    rows.sort_by(|a, b| (&a.owner, &a.branch, &a.name).cmp(&(&b.owner, &b.branch, &b.name)));
     Ok(rows)
 }
 

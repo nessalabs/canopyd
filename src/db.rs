@@ -120,6 +120,8 @@ pub struct DbContext<'a> {
     /// from the same place the worktree's services do, so it is stable and handed back with them.
     pub branch: &'a str,
     pub ports: &'a Utf8Path,
+    /// Whose rows these are in a shared registry; see [`crate::ports::Allocation::owner`].
+    pub ports_owner: &'a str,
 }
 
 /// Whether a recorded fork is still there.
@@ -511,6 +513,7 @@ mod tests {
                 env: &NO_ENV,
                 branch: "feat/x",
                 ports: &self.ports,
+                ports_owner: "",
             }
         }
 
@@ -522,6 +525,7 @@ mod tests {
                 env: &NO_ENV,
                 branch: "main",
                 ports: &self.ports,
+                ports_owner: "",
             }
         }
 
