@@ -311,6 +311,23 @@ impl Run<'_> {
         if fs::symlink_metadata(&to).is_ok() {
             return Ok(entry(path, strategy, CopyResult::Skipped, 0, started));
         }
+        // git lists a symlink as one path and never looks inside it, so this may be a link to a
+        // whole directory. Every copy call follows links — APFS `clonefile` clones the entire
+        // tree behind one — which turned npm's workspace links into stale copies of the source's
+        // packages and `.bin` shims into scripts whose relative imports no longer resolve. A
+        // link is carried as a link, whatever the rule's strategy.
+        if fs::symlink_metadata(&from).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            let pointed = fs::read_link(&from).map_err(|error| fail(format!("could not read link {from}: {error}")))?;
+            if self.dry_run {
+                return Ok(entry(path, strategy, CopyResult::Planned, 0, started));
+            }
+            let parent = to.parent().unwrap_or(self.target);
+            fs::create_dir_all(parent).map_err(|error| fail(format!("could not create {parent}: {error}")))?;
+            let relinked = self.relink(pointed);
+            std::os::unix::fs::symlink(&relinked, &to)
+                .map_err(|error| fail(format!("could not link {to} to {}: {error}", relinked.display())))?;
+            return Ok(entry(path, strategy, CopyResult::Symlinked, 0, started));
+        }
         if self.dry_run {
             let bytes = size(&from).map_err(&fail)?;
             return Ok(entry(path, strategy, CopyResult::Planned, bytes, started));
@@ -334,6 +351,17 @@ impl Run<'_> {
             }
         };
         Ok(entry(path, strategy, result, bytes, started))
+    }
+
+    /// Where a carried link should point in the worktree. A relative target is kept as written:
+    /// it resolves against the worktree now, which is the point (`../../packages/ui` must mean
+    /// the worktree's packages, not the source's). An absolute target inside the source checkout
+    /// is moved to the same place in the worktree for the same reason; one outside it is kept.
+    fn relink(&self, pointed: std::path::PathBuf) -> std::path::PathBuf {
+        match pointed.strip_prefix(self.source.as_std_path()) {
+            Ok(inside) if pointed.is_absolute() => self.target.as_std_path().join(inside),
+            _ => pointed,
+        }
     }
 
     /// A copy-on-write clone where the filesystem can (APFS `clonefile`, Linux `FICLONE`), and a
@@ -811,6 +839,88 @@ mod tests {
         assert_eq!(entry_for(&outcome, "node_modules/pkg/index.js").bytes, 0);
     }
 
+    /// Makes a symlink in the source checkout.
+    fn link_in(checkout: &Checkout, path: &str, pointing_at: &str) {
+        let at = checkout.source.join(path);
+        fs::create_dir_all(at.parent().expect("a parent")).expect("create parent");
+        std::os::unix::fs::symlink(pointing_at, &at).expect("symlink");
+    }
+
+    #[test]
+    fn a_relative_link_to_a_directory_lands_as_the_same_link_whatever_the_strategy() {
+        // npm workspaces: node_modules/@scope/pkg -> ../../packages/pkg. Copied through, it would
+        // become a snapshot of the source's package that never sees the worktree's edits.
+        for strategy in [CopyStrategy::Clone, CopyStrategy::Copy, CopyStrategy::Symlink] {
+            let checkout = Checkout::new();
+            checkout.ignore(".gitignore", "node_modules/\n");
+            checkout.track(&[("packages/pkg/index.js", "source\n")]);
+            link_in(&checkout, "node_modules/@scope/pkg", "../../packages/pkg");
+            checkout.write("node_modules/dep/index.js", "dep\n");
+            checkout.place("packages/pkg/index.js", "worktree\n");
+
+            let outcome = checkout.run(&[rule_with("node_modules", strategy)]);
+
+            let entry = entry_for(&outcome, "node_modules/@scope/pkg");
+            assert_eq!((entry.result, entry.bytes), (CopyResult::Symlinked, 0), "{strategy:?}");
+            let landed = checkout.target.join("node_modules/@scope/pkg");
+            assert!(fs::symlink_metadata(&landed).expect("landed").is_symlink(), "{strategy:?}");
+            assert_eq!(fs::read_link(&landed).expect("readlink"), std::path::Path::new("../../packages/pkg"));
+            assert_eq!(checkout.landed("node_modules/@scope/pkg/index.js"), "worktree\n", "{strategy:?}");
+        }
+    }
+
+    #[test]
+    fn a_bin_shim_stays_a_link_so_its_relative_imports_resolve() {
+        let checkout = Checkout::new();
+        checkout.ignore(".gitignore", "node_modules/\n");
+        checkout.write("node_modules/tool/bin/tool.js", "import '../lib/x.js'\n");
+        link_in(&checkout, "node_modules/.bin/tool", "../tool/bin/tool.js");
+
+        checkout.run(&[rule_with("node_modules", CopyStrategy::Clone)]);
+
+        let landed = checkout.target.join("node_modules/.bin/tool");
+        assert_eq!(fs::read_link(&landed).expect("still a link"), std::path::Path::new("../tool/bin/tool.js"));
+        assert_eq!(checkout.landed("node_modules/.bin/tool"), "import '../lib/x.js'\n");
+    }
+
+    #[test]
+    fn an_absolute_link_into_the_source_moves_to_the_worktree_and_one_outside_is_kept() {
+        let checkout = Checkout::new();
+        checkout.ignore(".gitignore", "vendor/\n");
+        let inside = checkout.source.join("lib/real");
+        link_in(&checkout, "vendor/inside", inside.as_str());
+        link_in(&checkout, "vendor/outside", "/usr/bin/env");
+
+        checkout.run(&[rule("vendor")]);
+
+        assert_eq!(
+            fs::read_link(checkout.target.join("vendor/inside")).expect("link"),
+            checkout.target.join("lib/real").as_std_path()
+        );
+        assert_eq!(
+            fs::read_link(checkout.target.join("vendor/outside")).expect("link"),
+            std::path::Path::new("/usr/bin/env")
+        );
+    }
+
+    #[test]
+    fn a_dangling_link_is_carried_and_planned_without_failing() {
+        let checkout = Checkout::new();
+        checkout.ignore(".gitignore", "cache/\n");
+        link_in(&checkout, "cache/latest", "runs/gone");
+
+        let plan = checkout.plan(&[rule("cache")]);
+        assert_eq!(entry_for(&plan, "cache/latest").result, CopyResult::Planned);
+        assert!(plan.failures.is_empty(), "{:?}", plan.failures);
+
+        let outcome = checkout.run(&[rule("cache")]);
+        assert!(outcome.failures.is_empty(), "{:?}", outcome.failures);
+        assert_eq!(
+            fs::read_link(checkout.target.join("cache/latest")).expect("link"),
+            std::path::Path::new("runs/gone")
+        );
+    }
+
     #[test]
     fn clone_strategy_falls_back_to_copy_and_says_so() {
         let checkout = Checkout::new();
@@ -1023,25 +1133,6 @@ mod tests {
 
         assert_eq!(entry_for(&outcome, ".env").result, CopyResult::Skipped, "the plan is honest about the no-op");
         assert_eq!(checkout.landed(".env"), "WORKTREE=1\n");
-    }
-
-    #[test]
-    fn a_plan_reports_a_file_it_cannot_measure() {
-        let checkout = Checkout::new();
-        checkout.ignore(".gitignore", "*.env\n");
-        checkout.write("good.env", "A=1\n");
-        // A dangling symlink is listed like any other ignored entry and has no size to report.
-        // The plan has to say so rather than quietly leave the path out of it.
-        std::os::unix::fs::symlink("gone", checkout.source.join("broken.env").as_std_path()).expect("symlink");
-
-        let outcome = checkout.plan(&[rule("*.env")]);
-
-        assert_eq!(paths(&outcome), ["good.env"], "the measurable file is still planned");
-        assert_eq!(outcome.failures.len(), 1, "got {:?}", outcome.failures);
-        assert_eq!(outcome.failures[0].path, "broken.env");
-        let message = &outcome.failures[0].message;
-        assert!(message.starts_with(&format!("could not read {}/broken.env:", checkout.source)), "got {message:?}");
-        assert!(!checkout.target.exists(), "a plan that hit a failure still wrote nothing");
     }
 
     // -----------------------------------------------------------------------------------
