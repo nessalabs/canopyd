@@ -40,6 +40,60 @@ use crate::error::ErrorCode;
 /// 8080), below the ephemeral range macOS hands out for outbound connections.
 pub const DEFAULT_RANGE: (u16, u16) = (10_000, 19_999);
 
+/// Points every repository at one registry file instead of one per repository.
+///
+/// For an embedder that runs many projects side by side: per-repository registries each keep
+/// their own numbers unique, but nothing stops two of them handing out the same one. With one
+/// file, uniqueness is across everything that file holds. Rows are then tagged with the
+/// repository that owns them, so one project's branch `main` is not another's.
+pub const PORTS_FILE_VAR: &str = "CANOPYD_PORTS_FILE";
+
+/// Replaces [`DEFAULT_RANGE`] as `FROM-TO`, for an embedder that keeps a range of its own. A
+/// port that declares `range:` still has the last word.
+pub const PORT_RANGE_VAR: &str = "CANOPYD_PORT_RANGE";
+
+/// The shared registry [`PORTS_FILE_VAR`] names, if it names one.
+pub fn shared_registry() -> Option<Utf8PathBuf> {
+    std::env::var(PORTS_FILE_VAR).ok().filter(|value| !value.is_empty()).map(Utf8PathBuf::from)
+}
+
+/// The default range, as [`PORT_RANGE_VAR`] sets it, or [`DEFAULT_RANGE`].
+///
+/// An unreadable value is an error rather than a silent fallback: an embedder that asked for
+/// its own range and got this crate's would hand out ports its user has fenced off.
+pub fn default_range() -> Result<(u16, u16), PortError> {
+    match std::env::var(PORT_RANGE_VAR) {
+        Ok(text) if !text.is_empty() => parse_range(&text).ok_or(PortError::InvalidRange { text }),
+        _ => Ok(DEFAULT_RANGE),
+    }
+}
+
+/// Whose rows a repository's are: its common git dir, which all its worktrees share, when the
+/// registry is shared ([`PORTS_FILE_VAR`]); nobody in particular when it is the repository's own.
+pub fn owner_for(common_dir: &Utf8Path) -> String {
+    if shared_registry().is_some() { common_dir.to_string() } else { String::new() }
+}
+
+/// Whether `row` is `owner`'s; see [`Registry::with_owner`].
+pub fn is_owned_by(row: &Allocation, owner: &str) -> bool {
+    owns(owner, row)
+}
+
+/// The registry at `path`, reading and writing `owner`'s rows, with the default range the
+/// environment sets. What every caller that allocates should open, so none of them disagrees
+/// about the range or whose rows are whose.
+pub fn open(path: &Utf8Path, owner: &str) -> Result<Registry, PortError> {
+    Ok(Registry::load(path)?.with_owner(owner).with_default_range(default_range()?))
+}
+
+/// `FROM-TO`, both non-zero ports.
+fn parse_range(text: &str) -> Option<(u16, u16)> {
+    let (from, to) = text.split_once('-')?;
+    let from: u16 = from.trim().parse().ok()?;
+    let to: u16 = to.trim().parse().ok()?;
+    (from != 0 && to != 0).then(|| normalize((from, to)))
+}
+
 /// How long a read-modify-write waits for the lock before giving up.
 ///
 /// Long enough that a slow filesystem or a concurrent `canopyd up` finishes first, short
@@ -75,6 +129,10 @@ pub enum PortError {
     #[error("{port} is not a port number that can be reserved")]
     InvalidPort { port: u16 },
 
+    /// [`PORT_RANGE_VAR`] was set to something that is not `FROM-TO`.
+    #[error("{PORT_RANGE_VAR}={text} is not a range; expected FROM-TO, e.g. 40000-44999")]
+    InvalidRange { text: String },
+
     /// The file exists and could not be understood. Never silently recovered: see
     /// [`Registry::load`].
     #[error("{path} is not a usable port registry: {detail}")]
@@ -93,7 +151,7 @@ impl PortError {
     pub fn code(&self) -> ErrorCode {
         match self {
             PortError::RangeExhausted { .. } | PortError::PortInUse { .. } => ErrorCode::PortInUse,
-            PortError::InvalidPort { .. } => ErrorCode::ConfigInvalid,
+            PortError::InvalidPort { .. } | PortError::InvalidRange { .. } => ErrorCode::ConfigInvalid,
             PortError::Corrupt { .. } | PortError::Io(_) => ErrorCode::Io,
             PortError::Locked { .. } => ErrorCode::Locked,
         }
@@ -205,6 +263,10 @@ impl BindProbe for HostProbe {
 /// One named port of one branch, for its whole life.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Allocation {
+    /// The repository that holds this row, in a registry several share ([`PORTS_FILE_VAR`]).
+    /// Empty in a repository's own registry, where every row is that repository's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner: String,
     pub branch: String,
     pub name: String,
     pub port: u16,
@@ -227,6 +289,9 @@ struct RegistryFile {
 pub struct Registry {
     path: Utf8PathBuf,
     rows: Vec<Allocation>,
+    /// Whose rows this registry reads and writes; empty for "every row" (see [`Allocation::owner`]).
+    owner: String,
+    default_range: (u16, u16),
     probe: Box<dyn BindProbe>,
     lock_timeout: Duration,
     writes: u64,
@@ -256,6 +321,8 @@ impl Registry {
         Ok(Registry {
             rows: read_rows(path)?,
             path: path.to_owned(),
+            owner: String::new(),
+            default_range: DEFAULT_RANGE,
             probe,
             lock_timeout: DEFAULT_LOCK_TIMEOUT,
             writes: 0,
@@ -274,6 +341,32 @@ impl Registry {
     pub fn with_lock_timeout(mut self, timeout: Duration) -> Registry {
         self.lock_timeout = timeout;
         self
+    }
+
+    /// Reads and writes only `owner`'s rows, in a registry several repositories share. Every
+    /// row still counts as taken, which is the point of sharing one.
+    #[must_use]
+    pub fn with_owner(mut self, owner: impl Into<String>) -> Registry {
+        self.owner = owner.into();
+        self
+    }
+
+    /// The range a port without a `range:` of its own is allocated from.
+    #[must_use]
+    pub fn with_default_range(mut self, range: (u16, u16)) -> Registry {
+        self.default_range = normalize(range);
+        self
+    }
+
+    /// Whether `row` belongs to this registry's owner. An unowned registry owns everything, and
+    /// an unowned row belongs to everyone — the shape of a repository's own file.
+    fn owns(&self, row: &Allocation) -> bool {
+        owns(&self.owner, row)
+    }
+
+    /// The rows this registry's owner holds.
+    pub fn own_rows(&self) -> Vec<Allocation> {
+        self.rows.iter().filter(|row| self.owns(row)).cloned().collect()
     }
 
     /// The registry file this was loaded from.
@@ -296,7 +389,11 @@ impl Registry {
 
     /// This branch's ports, by name.
     pub fn for_branch(&self, branch: &str) -> BTreeMap<String, u16> {
-        self.rows.iter().filter(|row| row.branch == branch).map(|row| (row.name.clone(), row.port)).collect()
+        self.rows
+            .iter()
+            .filter(|row| self.owns(row) && row.branch == branch)
+            .map(|row| (row.name.clone(), row.port))
+            .collect()
     }
 
     /// Allocate-if-absent for every declared port, under the file lock.
@@ -325,16 +422,22 @@ impl Registry {
         let mut fresh = Vec::new();
 
         for (name, spec) in ports {
-            if let Some(row) = rows.iter().find(|row| row.branch == branch && &row.name == name) {
+            if let Some(row) = rows.iter().find(|row| self.owns(row) && row.branch == branch && &row.name == name) {
                 // Never re-probed: whatever is listening on it is almost certainly the service
                 // this row was created for.
                 allocated.insert(name.clone(), row.port);
                 continue;
             }
-            let range = normalize(spec.range.unwrap_or(DEFAULT_RANGE));
+            let range = normalize(spec.range.unwrap_or(self.default_range));
             let port = self.pick(project, branch, name, spec, range, &taken)?;
             taken.insert(port);
-            fresh.push(Allocation { branch: branch.to_owned(), name: name.clone(), port, allocated_at: now_secs() });
+            fresh.push(Allocation {
+                owner: self.owner.clone(),
+                branch: branch.to_owned(),
+                name: name.clone(),
+                port,
+                allocated_at: now_secs(),
+            });
             allocated.insert(name.clone(), port);
         }
 
@@ -389,7 +492,8 @@ impl Registry {
     /// [`save`]: Registry::save
     pub fn release(&mut self, branch: &str) -> usize {
         let before = self.rows.len();
-        self.rows.retain(|row| row.branch != branch);
+        let owner = self.owner.clone();
+        self.rows.retain(|row| !(owns(&owner, row) && row.branch == branch));
         before - self.rows.len()
     }
 
@@ -409,13 +513,15 @@ impl Registry {
             return Err(PortError::InvalidPort { port });
         }
         if let Some(holder) = self.rows.iter().find(|row| row.port == port)
-            && (holder.branch != branch || holder.name != name)
+            && !(self.owns(holder) && holder.branch == branch && holder.name == name)
         {
             return Err(PortError::PortInUse { port, branch: holder.branch.clone(), name: holder.name.clone() });
         }
-        match self.rows.iter_mut().find(|row| row.branch == branch && row.name == name) {
+        let owner = self.owner.clone();
+        match self.rows.iter_mut().find(|row| owns(&owner, row) && row.branch == branch && row.name == name) {
             Some(row) => row.port = port,
             None => self.rows.push(Allocation {
+                owner,
                 branch: branch.to_owned(),
                 name: name.to_owned(),
                 port,
@@ -423,6 +529,27 @@ impl Registry {
             }),
         }
         sort_rows(&mut self.rows);
+        Ok(())
+    }
+
+    /// Pins each `(name, port)` for `branch`, all or none, against the file as it is now.
+    ///
+    /// [`reserve`] then [`save`] works on the copy loaded earlier, and a `canopyd` in another
+    /// worktree that allocated in between would be written over. This re-reads under the lock,
+    /// like [`allocate`], so concurrent callers each see the other's rows.
+    ///
+    /// [`reserve`]: Registry::reserve
+    /// [`save`]: Registry::save
+    /// [`allocate`]: Registry::allocate
+    pub fn reserve_all(&mut self, branch: &str, wanted: &[(String, u16)]) -> Result<(), PortError> {
+        let guard = self.lock()?;
+        self.rows = read_rows(&self.path)?;
+        for (name, port) in wanted {
+            self.reserve(branch, name, *port)?;
+        }
+        write_atomic(&self.path, &self.rows)?;
+        self.writes += 1;
+        drop(guard);
         Ok(())
     }
 
@@ -446,6 +573,10 @@ impl Registry {
     }
 }
 
+fn owns(owner: &str, row: &Allocation) -> bool {
+    owner.is_empty() || row.owner.is_empty() || row.owner == owner
+}
+
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()
 }
@@ -453,7 +584,7 @@ fn now_secs() -> u64 {
 /// Stable order, so the file does not churn and two registries that hold the same allocations
 /// produce the same bytes.
 fn sort_rows(rows: &mut [Allocation]) {
-    rows.sort_by(|a, b| (&a.branch, &a.name).cmp(&(&b.branch, &b.name)));
+    rows.sort_by(|a, b| (&a.owner, &a.branch, &a.name).cmp(&(&b.owner, &b.branch, &b.name)));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -523,8 +654,8 @@ fn read_rows(path: &Utf8Path) -> Result<Vec<Allocation>, PortError> {
     }
     let mut rows = file.allocations;
     sort_rows(&mut rows);
-    if let Some(duplicate) = first_duplicate(rows.iter().map(|row| (&row.branch, &row.name))) {
-        return Err(corrupt(path, format!("{}/{} appears twice", duplicate.0, duplicate.1)));
+    if let Some(duplicate) = first_duplicate(rows.iter().map(|row| (&row.owner, &row.branch, &row.name))) {
+        return Err(corrupt(path, format!("{}/{} appears twice", duplicate.1, duplicate.2)));
     }
     let mut ports: Vec<u16> = rows.iter().map(|row| row.port).collect();
     ports.sort_unstable();

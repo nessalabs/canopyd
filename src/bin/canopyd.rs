@@ -73,6 +73,10 @@ enum Command {
         /// Hand a branch's ports back to the pool.
         #[arg(long, conflicts_with_all = ["all"])]
         release: bool,
+        /// Pin a port for this branch, as `NAME=PORT`. Repeatable. For an embedder that picks
+        /// some numbers itself and needs them in the registry, so nothing else is handed them.
+        #[arg(long = "reserve", value_name = "NAME=PORT", conflicts_with_all = ["all", "release"])]
+        reserve: Vec<String>,
     },
     /// Show the resolved environment for a branch's worktree.
     Env {
@@ -472,11 +476,10 @@ fn run(cli: &Cli) -> Result<u8> {
             }
         }
 
-        Command::Ports { ref branch, all, release } => {
+        Command::Ports { ref branch, all, release, ref reserve } => {
             if all {
-                let path = canopy.ports_path();
-                let registry = canopyd::ports::Registry::load(&path)?;
-                let rows: Vec<_> = registry.rows().to_vec();
+                // This repository's rows: a shared registry holds other projects' too.
+                let rows = canopy.port_registry()?.own_rows();
                 if cli.json {
                     emit("ports", &rows);
                 } else if rows.is_empty() {
@@ -488,7 +491,16 @@ fn run(cli: &Cli) -> Result<u8> {
                 }
             } else {
                 let branch = resolve_branch(&canopy, branch.as_deref())?;
-                if release {
+                if !reserve.is_empty() {
+                    let table = canopy.reserve_ports(&branch, &parse_reservations(reserve)?)?;
+                    if cli.json {
+                        emit("ports", &table);
+                    } else {
+                        for (name, port) in &table {
+                            println!("{name:<12} {port}");
+                        }
+                    }
+                } else if release {
                     let removed = canopy.release_ports(&branch)?;
                     if cli.json {
                         emit("ports", &serde_json::json!({ "branch": branch, "released": removed }));
@@ -1122,6 +1134,21 @@ fn searched_description(canopy: &Canopy) -> String {
 }
 
 /// `KEY=VALUE`, the spelling `--env` takes. An empty value is legal; an absent `=` is not.
+/// `--reserve web=40100` as `("web", 40100)`.
+fn parse_reservations(raw: &[String]) -> Result<Vec<(String, u16)>> {
+    let invalid = |text: &str| Error::Module {
+        code: canopyd::ErrorCode::ConfigInvalid,
+        message: format!("--reserve {text}: expected NAME=PORT, e.g. db-main=40100"),
+    };
+    raw.iter()
+        .map(|text| {
+            let (name, port) = text.split_once('=').ok_or_else(|| invalid(text))?;
+            let port: u16 = port.parse().map_err(|_| invalid(text))?;
+            if name.is_empty() { Err(invalid(text)) } else { Ok((name.to_owned(), port)) }
+        })
+        .collect()
+}
+
 fn parse_env(raw: &[String]) -> Result<Vec<(String, String)>> {
     let invalid = |message: String| Error::Module { code: canopyd::ErrorCode::ConfigInvalid, message };
     raw.iter()

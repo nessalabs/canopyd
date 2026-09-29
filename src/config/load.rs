@@ -7,13 +7,18 @@
 //! 2. **The repository's main checkout.** The committed, shared answer.
 //! 3. **`$XDG_CONFIG_HOME/canopyd/<repo>/canopy.yaml`.** For a repo that should not carry a
 //!    `canopy.yaml` of its own — someone else's project you want to run this way anyway.
-//!    Searched last, so a committed file always wins.
+//!    Searched last, so a committed file always wins. An embedder that keeps these files
+//!    somewhere else names its file with `CANOPYD_CONFIG`, which takes this step's place.
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
 
 use super::{Parsed, parse_str};
 use crate::error::Result;
+
+/// The file to use in place of the user config directory's, for an embedder that keeps its
+/// out-of-repo configs somewhere of its own. Still searched last.
+pub const CONFIG_VAR: &str = "CANOPYD_CONFIG";
 
 /// Both spellings, because both are in the wild.
 pub const FILE_NAMES: &[&str] = &["canopy.yaml", "canopy.yml"];
@@ -44,6 +49,10 @@ pub fn locate(worktree_root: &Utf8Path, main_checkout: Option<&Utf8Path>, repo_n
         && let Some(path) = first_existing(main)
     {
         return Some(LocatedConfig { path, source: ConfigSource::MainCheckout });
+    }
+    if let Some(named) = std::env::var(CONFIG_VAR).ok().filter(|value| !value.is_empty()) {
+        let path = Utf8PathBuf::from(named);
+        return path.is_file().then_some(LocatedConfig { path, source: ConfigSource::UserConfig });
     }
     let user_dir = user_config_dir()?.join(repo_name);
     first_existing(&user_dir).map(|path| LocatedConfig { path, source: ConfigSource::UserConfig })

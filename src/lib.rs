@@ -142,9 +142,22 @@ impl Canopy {
     }
 
     /// The port registry for this repository, kept in the common git dir so every worktree
-    /// sees one table.
+    /// sees one table — or the one [`ports::PORTS_FILE_VAR`] names, shared with other
+    /// repositories.
     pub fn ports_path(&self) -> Utf8PathBuf {
-        self.repo.common_dir.join("canopy").join("ports.json")
+        ports::shared_registry().unwrap_or_else(|| self.repo.common_dir.join("canopy").join("ports.json"))
+    }
+
+    /// Whose rows this repository's are in the registry: the common git dir, which every
+    /// worktree of the repository shares, when the registry is shared; nobody in particular
+    /// when it is the repository's own.
+    pub fn ports_owner(&self) -> String {
+        ports::owner_for(&self.repo.common_dir)
+    }
+
+    /// The registry, opened as this repository.
+    pub fn port_registry(&self) -> Result<ports::Registry> {
+        ports::open(&self.ports_path(), &self.ports_owner()).map_err(Error::from)
     }
 
     /// Allocate-if-absent for every port the config declares, and return the table. Idempotent:
@@ -162,10 +175,26 @@ impl Canopy {
         // `ports_path` is always a join, so there is a parent; `map_or` says that without a
         // branch nothing can take.
         path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
-        let mut registry = ports::Registry::load(&path).map_err(Error::from)?;
+        let mut registry = self.port_registry()?;
         let table = registry.allocate(&self.repo.name(), branch, &declared).map_err(Error::from)?;
         registry.save().map_err(Error::from)?;
         Ok(table)
+    }
+
+    /// Pins named ports for a branch, for an embedder that allocates some numbers itself — a
+    /// database container this crate does not run — and needs them in the same table as the
+    /// ones this crate hands out, or the two would hand out the same number. Returns the
+    /// branch's whole table.
+    pub fn reserve_ports(
+        &self,
+        branch: &str,
+        wanted: &[(String, u16)],
+    ) -> Result<std::collections::BTreeMap<String, u16>> {
+        let path = self.ports_path();
+        path.parent().map_or(Ok(()), std::fs::create_dir_all)?;
+        let mut registry = self.port_registry()?;
+        registry.reserve_all(branch, wanted).map_err(Error::from)?;
+        Ok(registry.for_branch(branch))
     }
 
     /// Hands a branch's ports back to the pool. Returns how many rows went.
@@ -174,7 +203,7 @@ impl Canopy {
         if !path.exists() {
             return Ok(0);
         }
-        let mut registry = ports::Registry::load(&path).map_err(Error::from)?;
+        let mut registry = self.port_registry()?;
         let removed = registry.release(branch);
         if removed > 0 {
             registry.save().map_err(Error::from)?;
@@ -207,6 +236,7 @@ impl Canopy {
         let no_env = std::collections::BTreeMap::new();
         let project_name = self.project_name();
         let ports_path = self.ports_path();
+        let ports_owner = self.ports_owner();
         let databases = db::ready(&db::DbContext {
             project_path: &project_root,
             project: &project_name,
@@ -214,6 +244,7 @@ impl Canopy {
             env: &no_env,
             branch,
             ports: &ports_path,
+            ports_owner: &ports_owner,
         })?;
         let default_config = config::CanopyConfig::empty();
         let config = self.config().and_then(|(_, parsed)| parsed.config.as_ref()).unwrap_or(&default_config);
@@ -270,6 +301,7 @@ impl Canopy {
             env: &std::collections::BTreeMap::new(),
             branch,
             ports: &ports_path,
+            ports_owner: &self.ports_owner(),
         };
         Ok(db::fork(&self.declared_databases(), only, &ctx, &source)?)
     }
@@ -285,6 +317,7 @@ impl Canopy {
             env: &std::collections::BTreeMap::new(),
             branch,
             ports: &ports_path,
+            ports_owner: &self.ports_owner(),
         })?)
     }
 
@@ -301,6 +334,7 @@ impl Canopy {
             env: &std::collections::BTreeMap::new(),
             branch,
             ports: &ports_path,
+            ports_owner: &self.ports_owner(),
         };
         Ok(db::reset(&self.declared_databases(), name, &ctx, &source)?)
     }
@@ -321,6 +355,7 @@ impl Canopy {
             env: &std::collections::BTreeMap::new(),
             branch,
             ports: &ports_path,
+            ports_owner: &self.ports_owner(),
         };
         Ok(db::refresh_templates(&self.declared_databases(), only, &ctx)?)
     }
@@ -336,6 +371,7 @@ impl Canopy {
             env: &std::collections::BTreeMap::new(),
             branch,
             ports: &ports_path,
+            ports_owner: &self.ports_owner(),
         };
         Ok(db::drop_forks(&self.declared_databases(), only, &ctx)?)
     }

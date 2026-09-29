@@ -192,6 +192,20 @@ back to the pool.
 The registry lives in `.git/canopy/ports.json`, so every worktree of the repository sees one
 table.
 
+`--reserve NAME=PORT` (repeatable) pins numbers a caller picked itself — a database container
+this tool does not run — so nothing else is handed them. It is refused with `port_in_use` when
+another branch holds the number.
+
+### Embedding
+
+A program that runs `canopyd` for many projects sets these:
+
+| Variable | Effect |
+|---|---|
+| `CANOPYD_PORTS_FILE` | One registry for every project, instead of one per repository. Rows are tagged with the repository that owns them, so two projects' `main` are different rows and never the same number. `ports --all`, `--release`, `doctor` and `gc` touch only the current repository's rows. |
+| `CANOPYD_PORT_RANGE` | `FROM-TO`, in place of the default `10000-19999` for ports that declare no `range:`. Anything else is `config_invalid`. |
+| `CANOPYD_CONFIG` | The out-of-repo `canopy.yaml` to use in place of `$XDG_CONFIG_HOME/canopyd/<repo>/`. Still searched last: a committed file wins. |
+
 ## `canopyd env [<branch>]`
 
 The resolved environment: Canopy's own facts, then `defaults.env`, then `env:`, last wins.
@@ -520,8 +534,7 @@ it is installed. Installing over a hook that is not ours is refused, with the sn
 
 | Command | Milestone |
 |---|---|
-| `config schema`, `config set` | M2b |
-| `run` (foreground supervisor with restart policy) | M10 |
+| `config set` | M2b |
 
 ## Exit codes
 
