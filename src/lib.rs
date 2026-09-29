@@ -351,6 +351,12 @@ impl Canopy {
         self.repo.common_dir.join("canopy").join("worktrees").join(paths::sanitize(branch))
     }
 
+    /// Whether `remove` would go ahead, without doing anything; see
+    /// [`repo::Repo::check_removable`].
+    pub fn check_removable(&self, target: &str, force: bool) -> Result<WorktreeEntry> {
+        self.repo.check_removable(target, force)
+    }
+
     /// Removes the worktree for a branch name or a path.
     pub fn remove(&self, target: &str, options: &worktree::RemoveOptions) -> Result<worktree::RemoveOutcome> {
         self.repo.remove_worktree(target, options)

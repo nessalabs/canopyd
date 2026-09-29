@@ -482,3 +482,20 @@ fn wait_with_timeout(
         }
     }
 }
+
+#[test]
+fn a_refused_removal_leaves_the_services_running() {
+    // Stopping a compose stack on the way out also removes its volumes. A removal that is then
+    // refused for uncommitted work must find the worktree exactly as it was, services and all.
+    let tag = marker("rm-refused");
+    let sleep = sleeper(&tag);
+    let (fx, wt) = prepared(&format!("  web:\n    run: {sleep}\n"));
+    run(&fx, &["up", "feat/x", "--no-wait"]);
+    assert_eq!(processes_matching(&tag), 1);
+    std::fs::write(wt.join("uncommitted.txt"), "work\n").unwrap();
+
+    let out = fx.cwt().args(["rm", "feat/x", "--json"]).output().unwrap();
+    err_envelope(&out.stdout, "worktree_dirty");
+    assert_eq!(processes_matching(&tag), 1, "a refused removal stopped the service");
+    stop_all(&fx);
+}
