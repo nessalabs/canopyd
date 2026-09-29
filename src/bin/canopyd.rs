@@ -664,11 +664,9 @@ fn run(cli: &Cli) -> Result<u8> {
         }
 
         Command::Setup { ref branch, force, ref only, ref timeout, ref env_overrides } => {
-            let branch = resolve_branch(&canopy, branch.as_deref())?;
-            let worktree = worktree_path_for_branch(&canopy, &branch)?;
-            if !worktree.exists() {
-                return Err(Error::WorktreeNotFound(format!("{branch} has no checkout at {worktree}")));
-            }
+            // The same branch, checkout, environment and `${…}` scope `up` resolves: a step that
+            // says `${ports.web}` or `${db.main.url}` means what the service that runs next does.
+            let (_branch, worktree, _state, table, owner) = service_context(&canopy, branch.as_deref(), env_overrides)?;
             let default_config = canopyd::config::CanopyConfig::empty();
             let config = canopy.config().and_then(|(_, p)| p.config.as_ref()).unwrap_or(&default_config);
             let timeout = match timeout {
@@ -678,11 +676,21 @@ fn run(cli: &Cli) -> Result<u8> {
                 })?),
                 None => None,
             };
-            let mut env = canopy.env_for(&branch, &worktree)?.to_map();
-            // Layered last, so an embedder's value wins over anything resolved here.
-            for (key, value) in parse_env(env_overrides)? {
-                env.insert(key, value);
-            }
+            let facts = owner.facts();
+            let steps: Vec<canopyd::config::SetupStep> = config
+                .setup
+                .iter()
+                .map(|step| canopyd::config::SetupStep {
+                    run: canopyd::env::interpolate(&step.run, &facts, &table),
+                    env: step
+                        .env
+                        .iter()
+                        .map(|(key, value)| (key.clone(), canopyd::env::interpolate(value, &facts, &table)))
+                        .collect(),
+                    ..step.clone()
+                })
+                .collect();
+            let env = table.to_map();
             let options = canopyd::SetupOptions {
                 worktree: &worktree,
                 // The main checkout is what a worktree was made from, so it is what
@@ -702,7 +710,7 @@ fn run(cli: &Cli) -> Result<u8> {
                     let _ = writeln!(std::io::stderr(), "{text}");
                 }
             };
-            let outcome = canopyd::run_setup(&config.setup, &options, &mut on_line)?;
+            let outcome = canopyd::run_setup(&steps, &options, &mut on_line)?;
 
             if cli.json {
                 // A verdict, like `config check`: the run happened, and the answer may be no.
@@ -927,38 +935,57 @@ fn run(cli: &Cli) -> Result<u8> {
         Command::Hook(ref hook_command) => return run_hook(cli, &canopy, hook_command),
 
         Command::Rm { ref target, force, delete_branch } => {
+            // Refused before anything else happens: stopping a compose stack below also removes
+            // its volumes, which a removal that is then refused for uncommitted work must not do.
+            canopy.check_removable(target, force)?;
             // Stop anything still running before the checkout goes, or a dev server keeps
             // writing into a directory that no longer exists.
             let stopped = stop_services_for(&canopy, target).unwrap_or_default();
             let options = canopyd::RemoveOptions { force, delete_branch: delete_branch.into() };
             let outcome = canopy.remove(target, &options)?;
+            // Everything after this point is best effort: the checkout is gone, so reporting the
+            // command as failed would tell the caller a removal that happened did not.
+            let mut warnings = Vec::new();
             // Hand the ports back. Without this the registry accumulates rows for worktrees
             // that no longer exist and slowly exhausts the range.
-            let released =
-                outcome.branch.as_deref().map(|branch| canopy.release_ports(branch)).transpose()?.unwrap_or(0);
+            let released = match outcome.branch.as_deref().map(|branch| canopy.release_ports(branch)).transpose() {
+                Ok(released) => released.unwrap_or(0),
+                Err(error) => {
+                    warnings.push(format!("ports were not released: {error}"));
+                    0
+                }
+            };
             // A file-backed fork goes with the state directory below. One on a server does not:
-            // it has to be dropped while the record that names it still exists. Best effort, like
-            // everything after the checkout is gone — there is no worktree left to fail for.
-            let dropped =
-                outcome.branch.as_deref().and_then(|branch| canopy.db_drop(branch, None).ok()).unwrap_or_default();
+            // it has to be dropped while the record that names it still exists.
+            let dropped = match outcome.branch.as_deref().map(|branch| canopy.db_drop(branch, None)).transpose() {
+                Ok(dropped) => dropped.unwrap_or_default(),
+                Err(error) => {
+                    warnings.push(format!("database forks were not dropped: {error}"));
+                    Vec::new()
+                }
+            };
             let state = outcome.branch.as_deref().map(|branch| canopy.state_dir(branch));
             if let Some(state) = state.filter(|path| path.exists()) {
                 // The records and logs describe a worktree that is gone.
                 let _ = std::fs::remove_dir_all(&state);
             }
             if cli.json {
-                emit(
-                    "rm",
-                    &serde_json::json!({
-                        "path": outcome.path,
-                        "branch": outcome.branch,
-                        "branch_deleted": outcome.branch_deleted,
-                        "ports_released": released,
-                        "services_stopped": stopped,
-                        "databases_dropped": dropped,
-                    }),
+                let data = serde_json::json!({
+                    "path": outcome.path,
+                    "branch": outcome.branch,
+                    "branch_deleted": outcome.branch_deleted,
+                    "ports_released": released,
+                    "services_stopped": stopped,
+                    "databases_dropped": dropped,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string(&Envelope::ok("rm", data, warnings)).expect("envelope is serializable")
                 );
             } else {
+                for warning in &warnings {
+                    let _ = writeln!(std::io::stderr(), "warning: {warning}");
+                }
                 println!("removed {}", outcome.path);
                 if outcome.branch_deleted {
                     println!("deleted branch {}", outcome.branch.as_deref().unwrap_or("?"));

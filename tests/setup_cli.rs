@@ -41,6 +41,21 @@ fn the_resolved_environment_reaches_each_step() {
 }
 
 #[test]
+fn a_step_is_interpolated_like_a_service() {
+    // `${…}` is canopy.yaml's syntax, not the shell's: left in place, `/bin/sh` rejects
+    // `${ports.web}` as a bad substitution and the step fails before it starts.
+    let (fx, wt) = with_worktree(
+        "  - name: subst\n    run: printf '%s %s %s' ${ports.web} ${worktree.name} \"$FROM_STEP\" > subst.txt\n    env:\n      FROM_STEP: at-${env.EXTRA}\n",
+    );
+    let out = fx.cwt().args(["setup", "feat/x", "--env", "EXTRA=given", "--json"]).output().unwrap();
+    assert!(out.status.success(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+
+    let ports = ok_envelope(&fx.cwt().args(["ports", "feat/x", "--json"]).output().unwrap().stdout)["data"].clone();
+    let written = std::fs::read_to_string(wt.join("subst.txt")).unwrap();
+    assert_eq!(written, format!("{} feat-x at-given", ports["web"]));
+}
+
+#[test]
 fn a_step_runs_in_its_own_cwd_which_is_created_if_missing() {
     let (fx, wt) = with_worktree("  - name: nested\n    run: pwd > where.txt\n    cwd: apps/web\n");
     fx.cwt().args(["setup", "feat/x"]).output().unwrap();

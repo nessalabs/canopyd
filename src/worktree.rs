@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::paths::{self, PathVars};
-use crate::repo::Repo;
+use crate::repo::{Repo, WorktreeEntry};
 
 /// What branch a new worktree should check out.
 #[derive(Debug, Clone)]
@@ -151,10 +151,12 @@ impl Repo {
         })
     }
 
-    /// Removes the worktree for `target`, which may be a branch name or a path.
+    /// The worktree `remove_worktree` would remove, or the reason it would refuse: not found, the
+    /// main checkout, or uncommitted work without `force`.
     ///
-    /// A detached worktree has no branch, so addressing by path has to work.
-    pub fn remove_worktree(&self, target: &str, options: &RemoveOptions) -> Result<RemoveOutcome> {
+    /// Asked before anything irreversible happens around the removal — stopping a compose stack
+    /// wipes its volumes, and that must not happen for a removal that is then refused.
+    pub fn check_removable(&self, target: &str, force: bool) -> Result<WorktreeEntry> {
         let entries = self.worktrees()?;
         let wanted = Utf8Path::new(target);
         let entry = entries
@@ -167,19 +169,26 @@ impl Repo {
         if entries.first().is_some_and(|first| first.path == entry.path) {
             return Err(Error::CannotRemoveMain(entry.path.clone()));
         }
+        // Our own check rather than git's, so the refusal can say how much is at stake.
+        // `git worktree remove` also refuses, but only says "contains modified files".
+        if !force && entry.path.exists() {
+            let dirty = self.dirty_counts(&entry.path)?;
+            if dirty.total > 0 {
+                return Err(Error::WorktreeDirty { path: entry.path.clone(), counts: dirty });
+            }
+        }
+        Ok(entry.clone())
+    }
 
+    /// Removes the worktree for `target`, which may be a branch name or a path.
+    ///
+    /// A detached worktree has no branch, so addressing by path has to work.
+    pub fn remove_worktree(&self, target: &str, options: &RemoveOptions) -> Result<RemoveOutcome> {
+        let entry = self.check_removable(target, options.force)?;
         let path = entry.path.clone();
         let branch = entry.branch.clone();
 
         if path.exists() {
-            // Our own check rather than git's, so the refusal can say how much is at stake.
-            // `git worktree remove` also refuses, but only says "contains modified files".
-            if !options.force {
-                let dirty = self.dirty_counts(&path)?;
-                if dirty.total > 0 {
-                    return Err(Error::WorktreeDirty { path: path.clone(), counts: dirty });
-                }
-            }
             let mut args = vec!["worktree", "remove"];
             if options.force {
                 args.push("--force");

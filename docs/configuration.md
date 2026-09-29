@@ -105,9 +105,6 @@ a value that *contains* `${…}` after substitution is not re-scanned.
 **`{{ variable | filter }}`** — used *only* in `worktree.path`, which is rendered before a
 worktree exists and so cannot reference anything inside one. See [worktree](#worktree).
 
-> Resolution of `${…}` lands with `canopyd env`. Today the linter checks that every reference
-> points at something that exists, which is the half that catches typos.
-
 ## ports
 
 Each named port gets its own number per worktree, so two branches can run the same service at
@@ -226,6 +223,10 @@ setup:
 | `cwd` | string | relative to the worktree; created if absent |
 | `env` | string → string | on top of the resolved environment |
 | `if_changed` | list of globs | skip when these match the source checkout byte for byte |
+
+`run` and each `env` value are substituted before the step starts, with the same scope a
+service gets, so `${ports.web}` or `${db.main.url}` in a step means what it means to the service
+that runs next. Values passed with `setup --env` are in that scope as `${env.KEY}`.
 
 `if_changed` is how you avoid a four-minute `npm ci` on every worktree: the files are compared
 against the checkout the worktree was made from, and an unchanged lockfile means the step is
