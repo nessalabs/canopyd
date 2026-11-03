@@ -63,6 +63,9 @@ them — then tear it all down again.
 
 ## Documentation
 
+[The state atlas](docs/state/README.md) maps actual owners, partial results and recovery decisions. [Current verification](docs/state/verification.md) records local checks and known source limitations, including the reproduced registry lost update.
+
+
 | | |
 |---|---|
 | [Command reference](docs/cli.md) | Every command and flag |
