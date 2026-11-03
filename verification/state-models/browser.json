@@ -1,0 +1,88 @@
+{
+  "ok": true,
+  "browser": "156.0.8078.80",
+  "viewport": {
+    "width": 1440,
+    "height": 1000
+  },
+  "pages": 15,
+  "diagrams": 5,
+  "errors": [],
+  "results": [
+    {
+      "id": "canopyd",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "configuration",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "containers",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "databases",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "identity",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "interface",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "inventory",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "logs",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "maintenance",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "ports",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "services",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "setup",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "supervision",
+      "figures": 1,
+      "failed": 0
+    },
+    {
+      "id": "verification",
+      "figures": 0,
+      "failed": 0
+    },
+    {
+      "id": "worktrees",
+      "figures": 0,
+      "failed": 0
+    }
+  ]
+}

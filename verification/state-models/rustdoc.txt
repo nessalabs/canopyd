@@ -1,0 +1,68 @@
+   Compiling cc v1.4.6
+   Compiling syn v3.0.5
+   Compiling httparse v1.10.1
+   Compiling num-traits v0.2.19
+   Compiling rustls v0.23.44
+   Compiling serde_json v1.0.151
+    Checking regex-syntax v0.8.11
+    Checking http v1.5.0
+    Checking bstr v1.13.1
+    Checking once_cell v1.21.4
+    Checking smallvec v1.16.1
+    Checking granit-parser v1.2.1
+    Checking regex-automata v0.4.18
+    Checking ureq-proto v0.6.3
+   Compiling ring v0.17.14
+    Checking serde-saphyr v1.2.0
+   Compiling serde_derive_internals v0.30.0
+    Checking globset v0.4.20
+   Compiling serde_derive v1.0.229
+   Compiling ref-cast-impl v1.0.27
+   Compiling thiserror-impl v2.0.20
+   Compiling schemars_derive v1.2.2
+   Compiling clap_derive v4.6.4
+    Checking ignore v0.4.33
+    Checking ref-cast v1.0.27
+    Checking thiserror v2.0.20
+    Checking clap v4.6.6
+    Checking serde v1.0.229
+    Checking schemars v1.2.2
+    Checking rustls-webpki v0.103.15
+    Checking ureq v3.4.2
+ Documenting canopyd v0.6.0 (/Users/nessa/Documents/Codex/2026-11-02/hey-can-you-update-the-nessa/work/org-docs/canopyd)
+error: public documentation for `proc` links to private item `identify`
+  --> src/proc.rs:12:63
+   |
+12 | //!   user is typing in. Every signalling path goes through [`identify`] first, which compares
+   |                                                               ^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+   = note: `-D rustdoc::private-intra-doc-links` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(rustdoc::private_intra_doc_links)]`
+
+error: public documentation for `start_time` links to private item `identify`
+   --> src/proc.rs:122:28
+    |
+122 |     /// could look — see [`identify`] for what each case means for signalling.
+    |                            ^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `CommandExt::process_group`
+   --> src/proc.rs:178:49
+    |
+178 | /// The child is made a process group leader ([`CommandExt::process_group`]) so that
+    |                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `CommandExt` in scope
+    |
+    = note: `-D rustdoc::broken-intra-doc-links` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(rustdoc::broken_intra_doc_links)]`
+
+error: public documentation for `supervise` links to private item `observe_exit`
+  --> src/supervise.rs:26:31
+   |
+26 | //!   possible at all — see [`observe_exit`]. `up` exits seconds after spawning, which reparents
+   |                               ^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: could not document `canopyd`

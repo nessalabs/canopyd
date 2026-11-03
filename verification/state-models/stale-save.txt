@@ -1,0 +1,1 @@
+reproduced: second owner's committed allocation was overwritten by first owner's later save (2 rows -> 1)
